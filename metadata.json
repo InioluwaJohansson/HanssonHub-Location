@@ -1,0 +1,6 @@
+{
+  "name": "Location & Journey Tracker",
+  "description": "Real-time location tracker mapping movements with green dotted lines for trekking and blue lines for vehicles, automatic recording of places visited when staying over 90 seconds, and detailed telemetry movement logs.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
