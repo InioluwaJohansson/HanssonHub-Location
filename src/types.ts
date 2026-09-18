@@ -2,8 +2,14 @@ export type TravelMode = 'trekking' | 'vehicle' | 'stationary';
 
 export type AppTheme = 'light' | 'dark';
 
+export type RouteStatus = 'active' | 'completed' | 'cancelled';
+
 export interface LocationPoint {
-  id: string;
+  id: number;
+  userId?: number; // Integer identifier for the user
+  journeyId?: number; // Integer identifier for the specific journey
+  routeId?: number; // Route integer identifier for plotting
+  sequenceIndex?: number; // Zero-based sequence number in the journey path
   lat: number;
   lng: number;
   accuracy: number; // in meters
@@ -17,7 +23,7 @@ export interface LocationPoint {
 }
 
 export interface AppUser {
-  id: string;
+  id: number;
   name: string;
   avatar: string;
   color: string;
@@ -29,6 +35,9 @@ export interface AppUser {
   dwellDurationSeconds: number;
   activeDestinationName: string | null;
   activeDestinationCoords: { lat: number; lng: number } | null;
+  originName?: string;
+  originCoords?: { lat: number; lng: number };
+  activeRoutePath?: Array<{ lat: number; lng: number }>;
   isNavigating: boolean;
   navigationStartTime: number | null;
   speedKmH: number;
@@ -36,28 +45,30 @@ export interface AppUser {
 }
 
 export interface CompletedRouteLog {
-  id: string;
-  userId: string;
+  id: number;
+  userId: number;
   userName: string;
   userColor: string;
   userAvatar: string;
   destinationName: string;
   destinationCoords: { lat: number; lng: number };
   startTime: number;
-  endTime: number;
+  endTime?: number;
   durationSeconds: number;
   durationFormatted: string;
   distanceMeters: number;
   averageSpeedKmH: number;
   travelMode: 'WALKING' | 'DRIVING';
+  status: RouteStatus;
   completedAtTimeString: string;
 }
 
 export interface JourneySegment {
-  id: string;
-  userId?: string;
+  id: number;
+  userId?: number;
   userName?: string;
   userColor?: string;
+  journeyId?: number;
   startPoint: LocationPoint;
   endPoint: LocationPoint;
   path: Array<{ lat: number; lng: number }>;
@@ -70,8 +81,8 @@ export interface JourneySegment {
 }
 
 export interface RecordedPlace {
-  id: string;
-  userId?: string;
+  id: number;
+  userId?: number;
   userName?: string;
   userColor?: string;
   lat: number;
@@ -88,9 +99,9 @@ export interface RecordedPlace {
 }
 
 export interface CustomMarker {
-  id: string;
-  userId?: string;
-  userName?: string;
+  id: number;
+  userId: number; // Strictly tied to a specific user (integer id)
+  userName: string; // Name of user who created this marker
   userColor?: string;
   lat: number;
   lng: number;
@@ -101,11 +112,25 @@ export interface CustomMarker {
   isFromStayPoint?: boolean;
 }
 
+export interface JourneySession {
+  id: number; // Unique integer ID for easy identification and plotting
+  userId: number;
+  userName: string;
+  userColor: string;
+  routeName: string;
+  travelMode: TravelMode;
+  startTime: number;
+  endTime?: number | null;
+  totalDistanceMeters: number;
+  coordinates: LocationPoint[];
+}
+
 export interface RouteOption {
-  id: string;
-  userId?: string;
+  id: number;
+  userId?: number;
   userName?: string;
   userColor?: string;
+  status?: RouteStatus;
   summary: string;
   distanceMeters: number;
   durationSeconds: number;
@@ -127,7 +152,7 @@ export interface StationaryState {
   startTime: number | null;
   dwellDurationSeconds: number;
   qualifiesForRecordedPlace: boolean; // >= 90 seconds
-  recordedPlaceId: string | null;
+  recordedPlaceId: number | null;
 }
 
 export interface TrackingStats {

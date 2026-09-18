@@ -32,12 +32,15 @@ export const DataCollectedModal: React.FC<DataCollectedModalProps> = ({
 
   const dataFields = [
     {
-      category: '1. Coordinates & Geospatial Attributes',
+      category: '1. Coordinates & Geospatial Attributes (Tied to User, Journey & Route)',
       icon: Navigation,
       fields: [
-        { name: 'Latitude (lat)', type: 'Float (double)', desc: 'Geographic latitude with ~1 meter precision.' },
-        { name: 'Longitude (lng)', type: 'Float (double)', desc: 'Geographic longitude with ~1 meter precision.' },
-        { name: 'Accuracy (meters)', type: 'Float', desc: 'GPS accuracy radius from device hardware.' },
+        { name: 'User ID (userId)', type: 'String / Guid', desc: 'Identifies the user generating the coordinate data.' },
+        { name: 'Journey ID (journeyId)', type: 'String / Guid', desc: 'Unique journey session grouping a sequence of points.' },
+        { name: 'Route ID (routeId)', type: 'String / Guid (Nullable)', desc: 'Identifies the selected active route path.' },
+        { name: 'Sequence Index (sequenceIndex)', type: 'Integer', desc: 'Monotonically incrementing order for precise plotting.' },
+        { name: 'Latitude & Longitude', type: 'Float (double)', desc: 'Geographic coordinates with high sub-meter precision.' },
+        { name: 'Accuracy (meters)', type: 'Float', desc: 'GPS horizontal accuracy radius reported by device.' },
         { name: 'Heading (degrees)', type: 'Float (0-360°)', desc: 'Direction of travel relative to true north.' },
       ],
     },
@@ -48,7 +51,7 @@ export const DataCollectedModal: React.FC<DataCollectedModalProps> = ({
         { name: 'Timestamp (Epoch ms)', type: 'Integer (Int64)', desc: 'Exact millisecond Unix epoch when coordinate was sampled.' },
         { name: 'ISO 8601 Timestamp', type: 'String', desc: 'Standard UTC date-time string.' },
         { name: 'Segment Duration (s)', type: 'Integer', desc: 'Elapsed travel time between origin and destination point.' },
-        { name: 'Dwell Time (s)', type: 'Integer', desc: 'Continuous stationary duration at a resting spot.' },
+        { name: 'Dwell Time (s)', type: 'Integer', desc: 'Continuous stationary duration at a resting spot (≥ 90s for recorded place).' },
       ],
     },
     {
@@ -56,64 +59,213 @@ export const DataCollectedModal: React.FC<DataCollectedModalProps> = ({
       icon: Gauge,
       fields: [
         { name: 'Instantaneous Speed', type: 'Float (km/h & m/s)', desc: 'Real-time velocity detected by GPS sensors.' },
-        { name: 'Trekking Mode (≤ 15 km/h)', type: 'Enum (trekking)', desc: 'Walking, jogging, or hiking. Rendered with footprints icon.' },
-        { name: 'Vehicle Mode (> 15 km/h)', type: 'Enum (vehicle)', desc: 'Motorized transit. Rendered as a dotted blue line.' },
+        { name: 'Trekking Mode (≤ 15 km/h)', type: 'Enum (trekking)', desc: 'Walking, jogging, or hiking with footprints icon.' },
+        { name: 'Vehicle Mode (> 15 km/h)', type: 'Enum (vehicle)', desc: 'Motorized transit rendered as blue route path.' },
         { name: 'Distance (meters)', type: 'Float', desc: 'Calculated geodesic delta between consecutive points.' },
       ],
     },
     {
-      category: '4. Markers, Visited Places & Route Suggestions',
+      category: '4. Markers (Tied to User) & Visited Places',
       icon: MapPin,
       fields: [
-        { name: 'Custom Markers', type: 'Object Array', desc: 'User placed points with name, description, and icon.' },
-        { name: 'Recorded Places', type: 'Object Array', desc: 'Auto-saved when user stays stationary at a spot.' },
-        { name: 'Suggested Routes', type: 'Object Array', desc: 'Nearest & alternative corridors with ETA at current speed.' },
+        { name: 'Custom Markers', type: 'Object Array', desc: 'User placed points with name, description, category, and userId.' },
+        { name: 'Recorded Places', type: 'Object Array', desc: 'Auto-saved when user stays stationary at a spot for ≥ 90s.' },
+        { name: 'Active Route Suggestions', type: 'Object Array', desc: 'Real street corridors with multi-mode ETAs.' },
       ],
     },
   ];
 
-  const backendSchemaSnippet = `// Backend Storage Schema (PostgreSQL / Firestore)
-// 1. Visited Places Table
-CREATE TABLE visited_places (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_name VARCHAR(64) NOT NULL DEFAULT 'Inioluwa',
-  latitude DOUBLE PRECISION NOT NULL,
-  longitude DOUBLE PRECISION NOT NULL,
-  accuracy_meters REAL NOT NULL,
-  place_name TEXT,
-  formatted_address TEXT,
-  arrived_at TIMESTAMPTZ NOT NULL,
-  departed_at TIMESTAMPTZ,
-  dwell_duration_seconds INTEGER NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
+  const backendSchemaSnippet = `// =========================================================================
+// ASP.NET Core 8 / C# Data Models & Controller Methods
+// RouteTracker Telemetry Ingestion & Storage Architecture
+// =========================================================================
 
-// 2. Journey Segments Table
-CREATE TABLE journey_segments (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_name VARCHAR(64) NOT NULL DEFAULT 'Inioluwa',
-  travel_mode VARCHAR(16) CHECK (travel_mode IN ('trekking', 'vehicle')),
-  start_lat DOUBLE PRECISION NOT NULL,
-  start_lng DOUBLE PRECISION NOT NULL,
-  end_lat DOUBLE PRECISION NOT NULL,
-  end_lng DOUBLE PRECISION NOT NULL,
-  distance_meters REAL NOT NULL,
-  duration_seconds REAL NOT NULL,
-  average_speed_kmh REAL NOT NULL,
-  start_time TIMESTAMPTZ NOT NULL,
-  end_time TIMESTAMPTZ NOT NULL
-);
+namespace RouteTracker.Models
+{
+    /// <summary>
+    /// Individual coordinate point recorded during a journey.
+    /// Strictly tied to a specific User, Journey, and optional Route.
+    /// </summary>
+    public class CoordinatePoint
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        
+        [Required]
+        public string UserId { get; set; } = string.Empty; // e.g., "user-1" or Auth GUID
+        
+        [Required]
+        public Guid JourneyId { get; set; } // Identifies the continuous journey session
+        
+        public string? RouteId { get; set; } // Identifies the designated active route corridor
+        
+        public long SequenceIndex { get; set; } // Monotonic order (0, 1, 2, ...) for plotting
+        
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public double? Altitude { get; set; }
+        public float? AccuracyMeters { get; set; }
+        public float? HeadingDegrees { get; set; }
+        public float SpeedKmH { get; set; }
+        public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.UtcNow;
+    }
 
-// 3. User Custom Markers
-CREATE TABLE custom_markers (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL,
-  description TEXT,
-  category VARCHAR(32) NOT NULL DEFAULT 'generic',
-  latitude DOUBLE PRECISION NOT NULL,
-  longitude DOUBLE PRECISION NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);`;
+    /// <summary>
+    /// Metadata summarizing a complete user journey session.
+    /// </summary>
+    public class JourneySession
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public string UserId { get; set; } = string.Empty;
+        public string UserName { get; set; } = string.Empty;
+        public DateTimeOffset StartTime { get; set; }
+        public DateTimeOffset? EndTime { get; set; }
+        public float TotalDistanceMeters { get; set; }
+        public int TotalDurationSeconds { get; set; }
+        public float AverageSpeedKmH { get; set; }
+        public string Status { get; set; } = "Active"; // "Active", "Completed", "Cancelled"
+        public List<CoordinatePoint> Coordinates { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Custom map marker tied strictly to a specific user.
+    /// </summary>
+    public class CustomMarker
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        
+        [Required]
+        public string UserId { get; set; } = string.Empty; // User that created this marker
+        public string UserName { get; set; } = string.Empty;
+        public string UserColor { get; set; } = "#3B82F6";
+        
+        [Required]
+        public string Name { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+        public string Category { get; set; } = "generic"; // work, cafe, home, landmark, store
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public bool IsFromStayPoint { get; set; }
+        public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>
+    /// Completed route log for historical analysis and playback.
+    /// </summary>
+    public class CompletedRouteLog
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public string UserId { get; set; } = string.Empty;
+        public string RouteId { get; set; } = string.Empty;
+        public Guid JourneyId { get; set; }
+        public string OriginName { get; set; } = string.Empty;
+        public string DestinationName { get; set; } = string.Empty;
+        public float TotalDistanceMeters { get; set; }
+        public int DurationSeconds { get; set; }
+        public string TravelMode { get; set; } = "vehicle";
+        public DateTimeOffset CompletedAt { get; set; } = DateTimeOffset.UtcNow;
+    }
+}
+
+namespace RouteTracker.Controllers
+{
+    using Microsoft.AspNetCore.Mvc;
+    using RouteTracker.Models;
+
+    /// <summary>
+    /// Backend API Controller for telemetry data ingestion, saving and querying.
+    /// </summary>
+    [ApiController]
+    [Route("api/[controller]")]
+    public class TelemetryController : ControllerBase
+    {
+        private readonly ITelemetryService _telemetryService;
+
+        public TelemetryController(ITelemetryService telemetryService)
+        {
+            _telemetryService = telemetryService;
+        }
+
+        /// <summary>
+        /// 1. Start a new journey session for a user.
+        /// POST /api/telemetry/journeys/start
+        /// </summary>
+        [HttpPost("journeys/start")]
+        public async Task<ActionResult<JourneySession>> StartJourney([FromBody] StartJourneyDto dto)
+        {
+            var session = await _telemetryService.CreateJourneyAsync(dto.UserId, dto.UserName);
+            return Ok(session);
+        }
+
+        /// <summary>
+        /// 2. Stream and save a single coordinate point (silently recorded).
+        /// POST /api/telemetry/coordinates
+        /// </summary>
+        [HttpPost("coordinates")]
+        public async Task<IActionResult> SaveCoordinate([FromBody] CoordinatePoint point)
+        {
+            await _telemetryService.SaveCoordinateAsync(point);
+            return StatusCode(201);
+        }
+
+        /// <summary>
+        /// 3. Ingest a batch of coordinates for high-throughput buffering.
+        /// POST /api/telemetry/coordinates/batch
+        /// </summary>
+        [HttpPost("coordinates/batch")]
+        public async Task<IActionResult> SaveCoordinateBatch([FromBody] List<CoordinatePoint> points)
+        {
+            await _telemetryService.SaveBatchAsync(points);
+            return Ok(new { insertedCount = points.Count });
+        }
+
+        /// <summary>
+        /// 4. Complete an active journey session and compute aggregates.
+        /// PUT /api/telemetry/journeys/{journeyId}/complete
+        /// </summary>
+        [HttpPut("journeys/{journeyId:guid}/complete")]
+        public async Task<IActionResult> CompleteJourney(Guid journeyId, [FromBody] CompleteJourneyDto dto)
+        {
+            var result = await _telemetryService.CompleteJourneyAsync(journeyId, dto);
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// 5. Save a custom marker tied to a specific user.
+        /// POST /api/telemetry/markers
+        /// </summary>
+        [HttpPost("markers")]
+        public async Task<ActionResult<CustomMarker>> CreateMarker([FromBody] CustomMarker marker)
+        {
+            var saved = await _telemetryService.SaveMarkerAsync(marker);
+            return CreatedAtAction(nameof(GetMarkersByUser), new { userId = marker.UserId }, saved);
+        }
+
+        /// <summary>
+        /// 6. Query coordinate trail for a specific user and journey.
+        /// GET /api/telemetry/coordinates?userId={userId}&journeyId={journeyId}&routeId={routeId}
+        /// </summary>
+        [HttpGet("coordinates")]
+        public async Task<ActionResult<List<CoordinatePoint>>> GetCoordinates(
+            [FromQuery] string userId,
+            [FromQuery] Guid? journeyId,
+            [FromQuery] string? routeId)
+        {
+            var points = await _telemetryService.GetCoordinatesAsync(userId, journeyId, routeId);
+            return Ok(points);
+        }
+
+        /// <summary>
+        /// 7. Retrieve all custom markers created by a user.
+        /// GET /api/telemetry/markers?userId={userId}
+        /// </summary>
+        [HttpGet("markers")]
+        public async Task<ActionResult<List<CustomMarker>>> GetMarkersByUser([FromQuery] string userId)
+        {
+            var markers = await _telemetryService.GetMarkersByUserAsync(userId);
+            return Ok(markers);
+        }
+    }
+}`;
 
   const handleCopySchema = () => {
     navigator.clipboard.writeText(backendSchemaSnippet);
@@ -239,7 +391,7 @@ CREATE TABLE custom_markers (
             })}
           </div>
 
-          {/* Backend SQL Schema */}
+          {/* Backend C# Schema */}
           <div
             className={`border rounded-xl p-4 space-y-3 ${
               isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-zinc-900 border-zinc-800 text-zinc-100'
@@ -249,7 +401,7 @@ CREATE TABLE custom_markers (
               <div className="flex items-center gap-2">
                 <Server className="w-4 h-4 text-emerald-400" />
                 <span className="text-xs font-bold text-white uppercase tracking-wider">
-                  Backend Database Schema
+                  Backend C# Data Schema
                 </span>
               </div>
               <button
@@ -262,7 +414,7 @@ CREATE TABLE custom_markers (
                   </>
                 ) : (
                   <>
-                    <Copy className="w-3.5 h-3.5" /> Copy SQL
+                    <Copy className="w-3.5 h-3.5" /> Copy C# Classes
                   </>
                 )}
               </button>

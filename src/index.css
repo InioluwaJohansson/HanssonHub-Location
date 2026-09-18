@@ -1,1 +1,25 @@
 @import "tailwindcss";
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none !important;
+    width: 0px !important;
+    height: 0px !important;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none !important;
+    scrollbar-width: none !important;
+  }
+  #movement-logs-panel,
+  #movement-logs-panel * {
+    -ms-overflow-style: none !important;
+    scrollbar-width: none !important;
+  }
+  #movement-logs-panel::-webkit-scrollbar,
+  #movement-logs-panel *::-webkit-scrollbar {
+    display: none !important;
+    width: 0px !important;
+    height: 0px !important;
+  }
+}
+

@@ -4,11 +4,23 @@ import { LocationPoint, JourneySegment, RecordedPlace } from '../types';
  * Calculates Haversine distance in meters between two lat/lng pairs.
  */
 export function calculateDistanceMeters(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number
+  lat1?: number | null,
+  lon1?: number | null,
+  lat2?: number | null,
+  lon2?: number | null
 ): number {
+  if (
+    lat1 == null ||
+    lon1 == null ||
+    lat2 == null ||
+    lon2 == null ||
+    isNaN(lat1) ||
+    isNaN(lon1) ||
+    isNaN(lat2) ||
+    isNaN(lon2)
+  ) {
+    return 0;
+  }
   const R = 6371000; // Earth's radius in meters
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
@@ -19,7 +31,8 @@ export function calculateDistanceMeters(
       Math.sin(dLon / 2) *
       Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
+  const result = R * c;
+  return isNaN(result) ? 0 : result;
 }
 
 /**
@@ -76,11 +89,13 @@ export function formatDistance(meters: number): string {
 }
 
 /**
- * Creates a circular user avatar SVG icon with the user's name below and user's distinct color.
+ * Creates a circular user avatar SVG icon with the user's name below,
+ * displaying their profile image if available or their first letter initial.
  */
 export function createUserAvatarIcon(
   userName = 'Inioluwa',
-  userColor = '#3B82F6'
+  userColor = '#3B82F6',
+  avatarUrl?: string
 ): {
   url: string;
   scaledSize: google.maps.Size;
@@ -88,23 +103,31 @@ export function createUserAvatarIcon(
 } {
   const safeName = (userName || 'Inioluwa').trim();
   const initial = safeName.charAt(0).toUpperCase();
-  const width = Math.max(80, safeName.length * 8 + 26);
+  const width = Math.max(82, safeName.length * 8 + 26);
   const height = 66;
   const cx = width / 2;
+  const safeId = safeName.replace(/[^a-zA-Z0-9]/g, '_');
+
+  const avatarContent = avatarUrl
+    ? `<image href="${avatarUrl}" x="${cx - 16}" y="2" width="32" height="32" preserveAspectRatio="xMidYMid slice" clip-path="url(#avatar-clip-${safeId})"/>`
+    : `<text x="${cx}" y="23" fill="#ffffff" font-size="13" font-family="system-ui, -apple-system, sans-serif" font-weight="800" text-anchor="middle">${initial}</text>`;
 
   const svg = `
   <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     <defs>
-      <filter id="marker-shadow" x="-30%" y="-20%" width="160%" height="150%">
-        <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#000000" flood-opacity="0.4"/>
+      <filter id="marker-shadow-${safeId}" x="-30%" y="-20%" width="160%" height="150%">
+        <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#000000" flood-opacity="0.45"/>
       </filter>
+      <clipPath id="avatar-clip-${safeId}">
+        <circle cx="${cx}" cy="18" r="16" />
+      </clipPath>
     </defs>
 
     <!-- Outer Circular Avatar Ring in User Color -->
-    <circle cx="${cx}" cy="18" r="16" fill="${userColor}" stroke="#ffffff" stroke-width="2.5" filter="url(#marker-shadow)"/>
+    <circle cx="${cx}" cy="18" r="16" fill="${userColor}" stroke="#ffffff" stroke-width="2.5" filter="url(#marker-shadow-${safeId})"/>
 
-    <!-- User Initial Text -->
-    <text x="${cx}" y="23" fill="#ffffff" font-size="13" font-family="system-ui, -apple-system, sans-serif" font-weight="800" text-anchor="middle">${initial}</text>
+    <!-- User Profile Image or First Letter Initial Fallback -->
+    ${avatarContent}
 
     <!-- Online/Active GPS Beacon Ring -->
     <circle cx="${cx + 12}" cy="8" r="4.5" fill="#10b981" stroke="#ffffff" stroke-width="1.5"/>
@@ -113,7 +136,7 @@ export function createUserAvatarIcon(
     <polygon points="${cx - 4},34 ${cx + 4},34 ${cx},40" fill="${userColor}"/>
 
     <!-- User Name Pill Label -->
-    <rect x="${cx - (width - 12) / 2}" y="40" width="${width - 12}" height="20" rx="10" fill="#18181b" stroke="${userColor}" stroke-width="1.8" filter="url(#marker-shadow)"/>
+    <rect x="${cx - (width - 12) / 2}" y="40" width="${width - 12}" height="20" rx="10" fill="#18181b" stroke="${userColor}" stroke-width="1.8" filter="url(#marker-shadow-${safeId})"/>
     <text x="${cx}" y="53.5" fill="#ffffff" font-size="10" font-family="system-ui, -apple-system, sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.2">${safeName}</text>
   </svg>
   `.trim();
@@ -177,6 +200,127 @@ export function createPlaceMarkerIcon(
   };
 }
 
+const avatarIconCache = new Map<string, { url: string; scaledSize: google.maps.Size; anchor: google.maps.Point }>();
+
+export function getCachedUserAvatarIcon(
+  userName = 'Inioluwa',
+  userColor = '#3B82F6',
+  avatarUrl?: string
+) {
+  const key = `${userName}_${userColor}_${avatarUrl || 'none'}`;
+  if (!avatarIconCache.has(key)) {
+    const icon = createUserAvatarIcon(userName, userColor, avatarUrl);
+    avatarIconCache.set(key, icon);
+
+    // If there's an image URL, preload with offscreen canvas to guarantee perfect rendering across all browsers
+    if (avatarUrl && typeof window !== 'undefined') {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        try {
+          const safeName = (userName || 'Inioluwa').trim();
+          const width = Math.max(82, safeName.length * 8 + 26);
+          const height = 66;
+          const cx = width / 2;
+          const canvas = document.createElement('canvas');
+          const dpr = 2;
+          canvas.width = width * dpr;
+          canvas.height = height * dpr;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return;
+
+          ctx.scale(dpr, dpr);
+
+          // Draw stem pointer
+          ctx.beginPath();
+          ctx.moveTo(cx - 4, 34);
+          ctx.lineTo(cx + 4, 34);
+          ctx.lineTo(cx, 40);
+          ctx.fillStyle = userColor;
+          ctx.fill();
+
+          // Draw outer ring
+          ctx.beginPath();
+          ctx.arc(cx, 18, 17, 0, Math.PI * 2);
+          ctx.fillStyle = userColor;
+          ctx.fill();
+
+          // Clip inner circle for avatar image
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(cx, 18, 15, 0, Math.PI * 2);
+          ctx.clip();
+          ctx.drawImage(img, cx - 15, 3, 30, 30);
+          ctx.restore();
+
+          // White border
+          ctx.beginPath();
+          ctx.arc(cx, 18, 15, 0, Math.PI * 2);
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = '#ffffff';
+          ctx.stroke();
+
+          // Online green dot
+          ctx.beginPath();
+          ctx.arc(cx + 12, 8, 4.5, 0, Math.PI * 2);
+          ctx.fillStyle = '#10b981';
+          ctx.fill();
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = '#ffffff';
+          ctx.stroke();
+
+          // Name pill
+          const pillW = width - 12;
+          const pillH = 20;
+          const pillX = cx - pillW / 2;
+          const pillY = 40;
+          const r = 10;
+          ctx.beginPath();
+          ctx.moveTo(pillX + r, pillY);
+          ctx.arcTo(pillX + pillW, pillY, pillX + pillW, pillY + pillH, r);
+          ctx.arcTo(pillX + pillW, pillY + pillH, pillX, pillY + pillH, r);
+          ctx.arcTo(pillX, pillY + pillH, pillX, pillY, r);
+          ctx.arcTo(pillX, pillY, pillX + pillW, pillY, r);
+          ctx.closePath();
+          ctx.fillStyle = '#18181b';
+          ctx.fill();
+          ctx.lineWidth = 1.8;
+          ctx.strokeStyle = userColor;
+          ctx.stroke();
+
+          // Text
+          ctx.fillStyle = '#ffffff';
+          ctx.font = '700 10px system-ui, -apple-system, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(safeName, cx, 50.5);
+
+          const canvasUrl = canvas.toDataURL('image/png');
+          avatarIconCache.set(key, {
+            url: canvasUrl,
+            scaledSize: new google.maps.Size(width, height),
+            anchor: new google.maps.Point(cx, 18),
+          });
+        } catch (e) {
+          // If tainted or error, retain SVG
+        }
+      };
+      img.src = avatarUrl;
+    }
+  }
+  return avatarIconCache.get(key)!;
+}
+
+const placeMarkerIconCache = new Map<string, { url: string; scaledSize: google.maps.Size; anchor: google.maps.Point }>();
+
+export function getCachedPlaceMarkerIcon(category: string = 'generic', isRecordedStay: boolean = false, userColor?: string) {
+  const key = `${category}_${isRecordedStay}_${userColor || ''}`;
+  if (!placeMarkerIconCache.has(key)) {
+    placeMarkerIconCache.set(key, createPlaceMarkerIcon(category, isRecordedStay, userColor));
+  }
+  return placeMarkerIconCache.get(key)!;
+}
+
 /**
  * Calculates duration in human text given distance in meters and current speed in km/h.
  */
@@ -226,8 +370,8 @@ export async function reverseGeocode(
   }
 
   return {
-    name: `Location @ ${lat.toFixed(4)}, ${lng.toFixed(4)}`,
-    address: `${lat.toFixed(5)}° N, ${lng.toFixed(5)}° W`,
+    name: 'Stationary Recorded Spot',
+    address: 'Abeokuta, Ogun State',
   };
 }
 
@@ -255,7 +399,7 @@ export function generateSampleJourney(centerLat = 37.7749, centerLng = -122.4194
   let curTime = baseTime;
 
   points.push({
-    id: 'pt-0',
+    id: 1,
     lat: curLat,
     lng: curLng,
     accuracy: 8,
@@ -280,7 +424,7 @@ export function generateSampleJourney(centerLat = 37.7749, centerLng = -122.4194
     curTime += 20000; // 20s per step
 
     const newPt: LocationPoint = {
-      id: `pt-trek-${idx}`,
+      id: 10 + idx,
       lat: curLat,
       lng: curLng,
       accuracy: 6,
@@ -293,7 +437,7 @@ export function generateSampleJourney(centerLat = 37.7749, centerLng = -122.4194
 
     const dist = calculateDistanceMeters(prev.lat, prev.lng, newPt.lat, newPt.lng);
     segments.push({
-      id: `seg-trek-${idx}`,
+      id: 100 + idx,
       startPoint: prev,
       endPoint: newPt,
       path: [
@@ -320,7 +464,7 @@ export function generateSampleJourney(centerLat = 37.7749, centerLng = -122.4194
     const jitterLat = cafeLat + (Math.random() - 0.5) * 0.00004;
     const jitterLng = cafeLng + (Math.random() - 0.5) * 0.00004;
     points.push({
-      id: `pt-cafe-${j}`,
+      id: 200 + j,
       lat: jitterLat,
       lng: jitterLng,
       accuracy: 5,
@@ -333,7 +477,7 @@ export function generateSampleJourney(centerLat = 37.7749, centerLng = -122.4194
 
   // Recorded place #1 for >= 90s dwell
   places.push({
-    id: 'place-cafe-1',
+    id: 501,
     lat: cafeLat,
     lng: cafeLng,
     accuracy: 5,
@@ -362,7 +506,7 @@ export function generateSampleJourney(centerLat = 37.7749, centerLng = -122.4194
     curTime += offset.dur * 1000;
 
     const newPt: LocationPoint = {
-      id: `pt-veh-${idx}`,
+      id: 300 + idx,
       lat: curLat,
       lng: curLng,
       accuracy: 7,
@@ -375,7 +519,7 @@ export function generateSampleJourney(centerLat = 37.7749, centerLng = -122.4194
 
     const dist = calculateDistanceMeters(prev.lat, prev.lng, newPt.lat, newPt.lng);
     segments.push({
-      id: `seg-veh-${idx}`,
+      id: 400 + idx,
       startPoint: prev,
       endPoint: newPt,
       path: [

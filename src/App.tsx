@@ -24,8 +24,17 @@ import {
   reverseGeocode,
   formatDuration,
 } from './utils/geo';
-import { fetchRouteOptions } from './utils/routing';
-import { INITIAL_DEMO_USERS, INITIAL_COMPLETED_ROUTES, INITIAL_DEMO_MARKERS, PALETTE_30_COLORS } from './utils/users';
+import { fetchRouteOptions, generateAbeokutaRoadPath, fetchRealRoadPath } from './utils/routing';
+import {
+  INITIAL_DEMO_USERS,
+  getInitialDemoUsers,
+  INITIAL_COMPLETED_ROUTES,
+  INITIAL_DEMO_MARKERS,
+  INITIAL_RECORDED_PLACES,
+  PALETTE_30_COLORS,
+  ABEOKUTA_LOCATIONS,
+} from './utils/users';
+import { safeLoadStorage, safeSaveStorage, STORAGE_KEYS } from './utils/storage';
 import { MapTracker } from './components/MapTracker';
 import { MovementLogs } from './components/MovementLogs';
 import { HeaderBar } from './components/HeaderBar';
@@ -33,7 +42,7 @@ import { DataCollectedModal } from './components/DataCollectedModal';
 import { AlertCircle, Map, Layers, ChevronLeft, ChevronRight, Bell } from 'lucide-react';
 
 export interface ToastNotification {
-  id: string;
+  id: number;
   userName: string;
   userColor: string;
   title: string;
@@ -53,11 +62,13 @@ export default function App() {
   const userName = 'Inioluwa';
 
   // Multi-User Management
-  const [allUsers, setAllUsers] = useState<AppUser[]>(INITIAL_DEMO_USERS);
-  const [selectedUserIdFilter, setSelectedUserIdFilter] = useState<string>('all');
+  const [allUsers, setAllUsers] = useState<AppUser[]>(() => getInitialDemoUsers());
+  const [selectedUserIdFilter, setSelectedUserIdFilter] = useState<number | 'all'>('all');
   const [contentTypeFilter, setContentTypeFilter] = useState<'all' | 'markers' | 'routes' | 'movements'>('all');
-  const [timeRangeFilter, setTimeRangeFilter] = useState<'all' | '1w' | '2w' | '1m' | '3m' | '6m'>('all');
-  const [completedRoutes, setCompletedRoutes] = useState<CompletedRouteLog[]>(INITIAL_COMPLETED_ROUTES);
+  const [timeRangeFilter, setTimeRangeFilter] = useState<'all' | '1w' | '2w' | '1m' | '3m' | '6m'>('1w');
+  const [completedRoutes, setCompletedRoutes] = useState<CompletedRouteLog[]>(() =>
+    safeLoadStorage(STORAGE_KEYS.COMPLETED_ROUTES, INITIAL_COMPLETED_ROUTES)
+  );
 
   // Toast Notifications state
   const [notifications, setNotifications] = useState<ToastNotification[]>([]);
@@ -68,17 +79,25 @@ export default function App() {
   // Tracking state - Auto starts GPS automatically
   const [isTracking, setIsTracking] = useState<boolean>(true);
   const [currentPoint, setCurrentPoint] = useState<LocationPoint | null>(null);
-  const [pointsHistory, setPointsHistory] = useState<LocationPoint[]>([]);
-  const [segments, setSegments] = useState<JourneySegment[]>([]);
-  const [recordedPlaces, setRecordedPlaces] = useState<RecordedPlace[]>([]);
-  const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
+  const [pointsHistory, setPointsHistory] = useState<LocationPoint[]>(() =>
+    safeLoadStorage(STORAGE_KEYS.POINTS_HISTORY, [])
+  );
+  const [segments, setSegments] = useState<JourneySegment[]>(() =>
+    safeLoadStorage(STORAGE_KEYS.SEGMENTS, [])
+  );
+  const [recordedPlaces, setRecordedPlaces] = useState<RecordedPlace[]>(() =>
+    safeLoadStorage(STORAGE_KEYS.RECORDED_PLACES, INITIAL_RECORDED_PLACES)
+  );
+  const [selectedSegmentId, setSelectedSegmentId] = useState<number | null>(null);
 
-  // Custom User Markers initialized to Abeokuta landmarks
-  const [customMarkers, setCustomMarkers] = useState<CustomMarker[]>(INITIAL_DEMO_MARKERS);
+  // Custom User Markers initialized to Abeokuta landmarks (tied to specific users)
+  const [customMarkers, setCustomMarkers] = useState<CustomMarker[]>(() =>
+    safeLoadStorage(STORAGE_KEYS.CUSTOM_MARKERS, INITIAL_DEMO_MARKERS)
+  );
 
   // Suggested Routes & Alternatives
   const [routes, setRoutes] = useState<RouteOption[]>([]);
-  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+  const [selectedRouteId, setSelectedRouteId] = useState<number | null>(null);
   const [activeDestinationName, setActiveDestinationName] = useState<string | null>(null);
   const [activeDestinationCoords, setActiveDestinationCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [isNavigating, setIsNavigating] = useState<boolean>(false);
@@ -103,6 +122,11 @@ export default function App() {
   const watchIdRef = useRef<number | null>(null);
   const dwellTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastPointRef = useRef<LocationPoint | null>(null);
+  const lastVisualPointRef = useRef<LocationPoint | null>(null);
+  const activeJourneyIdRef = useRef<number>(
+    safeLoadStorage<number>(STORAGE_KEYS.ACTIVE_JOURNEY_ID, 1) || 1
+  );
+  const coordinateSeqRef = useRef<number>(0);
   const stationaryRef = useRef<StationaryState>({
     isStationary: false,
     anchorPoint: null,
@@ -114,18 +138,39 @@ export default function App() {
   const isRecordingPlaceRef = useRef<boolean>(false);
   const segmentSeqRef = useRef<number>(0);
 
+  // Sync data to localStorage on changes to prevent data loss on crashes or reloads
+  useEffect(() => {
+    safeSaveStorage(STORAGE_KEYS.POINTS_HISTORY, pointsHistory);
+  }, [pointsHistory]);
+
+  useEffect(() => {
+    safeSaveStorage(STORAGE_KEYS.SEGMENTS, segments);
+  }, [segments]);
+
+  useEffect(() => {
+    safeSaveStorage(STORAGE_KEYS.RECORDED_PLACES, recordedPlaces);
+  }, [recordedPlaces]);
+
+  useEffect(() => {
+    safeSaveStorage(STORAGE_KEYS.CUSTOM_MARKERS, customMarkers);
+  }, [customMarkers]);
+
+  useEffect(() => {
+    safeSaveStorage(STORAGE_KEYS.COMPLETED_ROUTES, completedRoutes);
+  }, [completedRoutes]);
+
   // Stats calculation
   const stats: TrackingStats = {
-    totalDistanceMeters: segments.reduce((acc, s) => acc + s.distanceMeters, 0),
-    totalDurationSeconds: segments.reduce((acc, s) => acc + s.durationSeconds, 0),
+    totalDistanceMeters: segments.reduce((acc, s) => acc + (s.distanceMeters || 0), 0),
+    totalDurationSeconds: segments.reduce((acc, s) => acc + (s.durationSeconds || 0), 0),
     trekkingDistanceMeters: segments
       .filter((s) => s.mode === 'trekking')
-      .reduce((acc, s) => acc + s.distanceMeters, 0),
+      .reduce((acc, s) => acc + (s.distanceMeters || 0), 0),
     vehicleDistanceMeters: segments
       .filter((s) => s.mode === 'vehicle')
-      .reduce((acc, s) => acc + s.distanceMeters, 0),
+      .reduce((acc, s) => acc + (s.distanceMeters || 0), 0),
     maxSpeedKmH: segments.reduce(
-      (max, s) => Math.max(max, s.averageSpeedKmH),
+      (max, s) => Math.max(max, s.averageSpeedKmH || 0),
       0
     ),
     currentSpeedKmH: currentPoint ? currentPoint.speed : 0,
@@ -139,7 +184,7 @@ export default function App() {
     async (point: LocationPoint, durationSec: number) => {
       const geoInfo = await reverseGeocode(point.lat, point.lng);
       const newPlace: RecordedPlace = {
-        id: `place-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        id: Date.now() + Math.floor(Math.random() * 1000),
         lat: point.lat,
         lng: point.lng,
         accuracy: point.accuracy,
@@ -166,8 +211,14 @@ export default function App() {
   const handleNewLocation = useCallback(
     (coords: GeolocationCoordinates, timestamp: number) => {
       const now = timestamp || Date.now();
+      const currentJourneyId = activeJourneyIdRef.current;
+
       const newPoint: LocationPoint = {
-        id: `pt-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        id: now + (coordinateSeqRef.current % 1000),
+        userId: 1,
+        journeyId: currentJourneyId,
+        routeId: selectedRouteId || undefined,
+        sequenceIndex: coordinateSeqRef.current++,
         lat: coords.latitude,
         lng: coords.longitude,
         accuracy: coords.accuracy || 10,
@@ -184,13 +235,49 @@ export default function App() {
         }),
       };
 
-      setCurrentPoint(newPoint);
+      // Check for significant visual movement (>= 3.0 meters) to avoid visual jitter/blinking
+      const lastVisual = lastVisualPointRef.current;
+      let isSignificantMovement = false;
+      if (!lastVisual) {
+        isSignificantMovement = true;
+      } else {
+        const moveDist = calculateDistanceMeters(
+          lastVisual.lat,
+          lastVisual.lng,
+          newPoint.lat,
+          newPoint.lng
+        );
+        if (moveDist >= 3.0) {
+          isSignificantMovement = true;
+        }
+      }
+
+      // Silently take the data point for history and telemetry without triggering unnecessary marker re-renders
+      if (isSignificantMovement) {
+        lastVisualPointRef.current = newPoint;
+        setCurrentPoint(newPoint);
+
+        // Sync user 1 (Inioluwa) in allUsers state only on significant movement
+        setAllUsers((prevUsers) =>
+          prevUsers.map((u) =>
+            u.id === 1 || u.isCurrentUser
+              ? {
+                  ...u,
+                  currentPoint: newPoint,
+                  speedKmH: newPoint.speed,
+                }
+              : u
+          )
+        );
+      }
 
       const lastPoint = lastPointRef.current;
 
       if (!lastPoint) {
         // First point: initialize stationary candidate
         lastPointRef.current = newPoint;
+        lastVisualPointRef.current = newPoint;
+        setCurrentPoint(newPoint);
         const initialStationary: StationaryState = {
           isStationary: true,
           anchorPoint: newPoint,
@@ -226,7 +313,8 @@ export default function App() {
         segmentSeqRef.current += 1;
         const mode = classifyTravelMode(calculatedSpeedKmH);
         const newSegment: JourneySegment = {
-          id: `seg-${now}-${segmentSeqRef.current}`,
+          id: now + segmentSeqRef.current,
+          userId: 1,
           startPoint: lastPoint,
           endPoint: newPoint,
           path: [
@@ -334,9 +422,9 @@ export default function App() {
       }
 
       lastPointRef.current = newPoint;
-      setPointsHistory((prevHistory) => [...prevHistory, newPoint]);
+      setPointsHistory((prevHistory) => [...prevHistory, newPoint].slice(-400));
     },
-    [recordStationaryPlace]
+    [recordStationaryPlace, selectedRouteId]
   );
 
   // Periodic timer to increment dwell time if stationary
@@ -396,9 +484,9 @@ export default function App() {
       setGeoError('Geolocation is not supported by your browser.');
       // Fallback default coordinates
       const fallbackPoint: LocationPoint = {
-        id: 'fallback-init',
-        lat: 37.7749,
-        lng: -122.4194,
+        id: 999999,
+        lat: 7.1475,
+        lng: 3.3619,
         accuracy: 15,
         speed: 0,
         speedMps: 0,
@@ -420,7 +508,7 @@ export default function App() {
         console.warn('Geolocation query note:', err.message);
         setGeoError('Waiting for GPS permission or fix. You can still navigate the map and add markers.');
         const fallbackPoint: LocationPoint = {
-          id: 'fallback-init',
+          id: 999999,
           lat: 37.7749,
           lng: -122.4194,
           accuracy: 15,
@@ -475,9 +563,9 @@ export default function App() {
   }) => {
     const newMarker: CustomMarker = {
       ...markerData,
-      id: `marker-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: Date.now() + Math.floor(Math.random() * 1000),
       createdAt: Date.now(),
-      userId: 'user-1',
+      userId: 1,
       userName: userName,
       userColor: PALETTE_30_COLORS[0],
     };
@@ -498,14 +586,14 @@ export default function App() {
    */
   const handleEditStayPointAsMarker = (place: RecordedPlace) => {
     const newMarker: CustomMarker = {
-      id: `marker-stay-${place.id}`,
+      id: Date.now() + Math.floor(Math.random() * 1000),
       lat: place.lat,
       lng: place.lng,
       name: place.name || 'Stationary Spot',
       description: place.notes || `Stayed here for ${formatDuration(place.dwellDurationSeconds)}`,
       category: 'landmark',
       createdAt: Date.now(),
-      userId: 'user-1',
+      userId: 1,
       userName: userName,
       userColor: PALETTE_30_COLORS[0],
       isFromStayPoint: true,
@@ -519,7 +607,7 @@ export default function App() {
   /**
    * Delete a custom marker
    */
-  const handleDeleteCustomMarker = (id: string) => {
+  const handleDeleteCustomMarker = (id: number) => {
     setCustomMarkers((prev) => prev.filter((m) => m.id !== id));
   };
 
@@ -530,12 +618,14 @@ export default function App() {
     destination: { lat: number; lng: number },
     destName?: string
   ) => {
+    // In mobile view, immediately switch to the Map tab to display the route
+    setMobileActiveView('map');
     setActiveDestinationName(destName || 'Selected Destination');
     setActiveDestinationCoords(destination);
     setIsNavigating(false);
     const origin = currentPoint
       ? { lat: currentPoint.lat, lng: currentPoint.lng }
-      : { lat: 37.7749, lng: -122.4194 };
+      : { lat: 7.1475, lng: 3.3619 };
 
     const currentSpeed = currentPoint ? currentPoint.speed : 0;
     const computedRoutes = await fetchRouteOptions(origin, destination, currentSpeed);
@@ -556,8 +646,9 @@ export default function App() {
 
   // Helper to trigger toast notification
   const addNotification = useCallback((uName: string, uColor: string, title: string, message: string) => {
+    const notifId = Date.now() + Math.floor(Math.random() * 1000);
     const newNotif: ToastNotification = {
-      id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: notifId,
       userName: uName,
       userColor: uColor,
       title,
@@ -565,6 +656,11 @@ export default function App() {
       timestamp: Date.now(),
     };
     setNotifications((prev) => [newNotif, ...prev.slice(0, 4)]);
+
+    // Auto-dismiss notification after 7 seconds
+    setTimeout(() => {
+      setNotifications((prev) => prev.filter((n) => n.id !== notifId));
+    }, 7000);
   }, []);
 
   /**
@@ -580,11 +676,11 @@ export default function App() {
     const destName = activeDestinationName || 'Selected Destination';
 
     const newCompletedLog: CompletedRouteLog = {
-      id: `croute-${Date.now()}`,
-      userId: 'user-1',
+      id: Date.now() + Math.floor(Math.random() * 1000),
+      userId: 1,
       userName: userName,
       userColor: PALETTE_30_COLORS[0],
-      userAvatar: '',
+      userAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80',
       destinationName: destName,
       destinationCoords: activeDestinationCoords || { lat: currentPoint?.lat || 7.1475, lng: currentPoint?.lng || 3.3619 },
       startTime: navigationStartTime || Date.now() - durationSeconds * 1000,
@@ -594,6 +690,7 @@ export default function App() {
       distanceMeters: distanceMeters,
       averageSpeedKmH: speedKmH,
       travelMode: activeRoute?.travelMode || 'DRIVING',
+      status: 'completed',
       completedAtTimeString: new Date().toLocaleString('en-US', {
         weekday: 'short',
         month: 'short',
@@ -616,9 +713,48 @@ export default function App() {
   }, [routes, selectedRouteId, navigationStartTime, activeDestinationName, activeDestinationCoords, currentPoint, addNotification]);
 
   /**
-   * Clear active route and cancel navigation
+   * Clear active route and cancel navigation (saves cancelled route if user was on a route)
    */
   const handleClearRoute = () => {
+    // If a route was actively navigated or selected, save it as a cancelled route log
+    if (activeDestinationName || routes.length > 0 || isNavigating) {
+      const activeRoute = routes.find((r) => r.id === selectedRouteId) || routes[0];
+      const durationSeconds = navigationStartTime
+        ? Math.max(1, Math.round((Date.now() - navigationStartTime) / 1000))
+        : 60;
+      const distanceMeters = activeRoute ? activeRoute.distanceMeters : 1000;
+      const speedKmH = Number((distanceMeters / 1000 / (durationSeconds / 3600)).toFixed(1)) || 20;
+      const destName = activeDestinationName || 'Selected Destination';
+
+      const cancelledLog: CompletedRouteLog = {
+        id: Date.now() + Math.floor(Math.random() * 1000),
+        userId: 1,
+        userName: userName,
+        userColor: PALETTE_30_COLORS[0],
+        userAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80',
+        destinationName: destName,
+        destinationCoords: activeDestinationCoords || { lat: currentPoint?.lat || 7.1475, lng: currentPoint?.lng || 3.3619 },
+        startTime: navigationStartTime || Date.now() - durationSeconds * 1000,
+        endTime: Date.now(),
+        durationSeconds: durationSeconds,
+        durationFormatted: formatDuration(durationSeconds),
+        distanceMeters: distanceMeters,
+        averageSpeedKmH: speedKmH,
+        travelMode: activeRoute?.travelMode || 'DRIVING',
+        status: 'cancelled',
+        completedAtTimeString: new Date().toLocaleString('en-US', {
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+      };
+
+      setCompletedRoutes((prev) => [cancelledLog, ...prev]);
+      addNotification(userName, PALETTE_30_COLORS[0], 'Route Cancelled', `Route to ${destName} has been cancelled and saved.`);
+    }
+
     setIsNavigating(false);
     setNavigationStartTime(null);
     setRoutes([]);
@@ -627,64 +763,141 @@ export default function App() {
     setActiveDestinationCoords(null);
   };
 
-  // Real-time animation tick for demo users
+  // Auto-upgrade initial demo user routes to real Google Maps road network paths as soon as API is available
   useEffect(() => {
+    let isMounted = true;
+    const timeout = setTimeout(() => {
+      allUsers.forEach((usr) => {
+        if (!usr.isCurrentUser && usr.id !== 1 && usr.activeDestinationCoords && usr.currentPoint) {
+          fetchRealRoadPath(usr.currentPoint, usr.activeDestinationCoords)
+            .then((realPath) => {
+              if (isMounted && realPath && realPath.length > 3) {
+                setAllUsers((currentList) =>
+                  currentList.map((u) => (u.id === usr.id ? { ...u, activeRoutePath: realPath } : u))
+                );
+              }
+            })
+            .catch((err) => {
+              console.warn('Initial road path fetch warning:', err);
+            });
+        }
+      });
+    }, 1200);
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timeout);
+    };
+  }, []);
+
+  // Real-time animation tick for demo users following street road paths
+  useEffect(() => {
+    const locValues = Object.values(ABEOKUTA_LOCATIONS);
     const interval = setInterval(() => {
       setAllUsers((prevUsers) =>
         prevUsers.map((usr) => {
-          if (usr.id === 'user-1') return usr; // Primary user moves via real GPS
-          if (usr.isNavigating && usr.destinationCoords) {
-            // Step user slightly towards destination
-            const dLat = usr.destinationCoords.lat - usr.currentPoint.lat;
-            const dLng = usr.destinationCoords.lng - usr.currentPoint.lng;
-            const distRemaining = Math.sqrt(dLat * dLat + dLng * dLng);
+          if (usr.isCurrentUser || usr.id === 1) return usr; // Primary user moves via real GPS
+          if (!usr.currentPoint || typeof usr.currentPoint.lat !== 'number' || isNaN(usr.currentPoint.lat)) {
+            return usr;
+          }
 
-            if (distRemaining < 0.0003) {
-              // Reached destination! Trigger arrival notification!
+          const destCoords = usr.activeDestinationCoords;
+          if (usr.isNavigating && destCoords && typeof destCoords.lat === 'number') {
+            let routePath = usr.activeRoutePath;
+            if (!routePath || routePath.length === 0) {
+              routePath = generateAbeokutaRoadPath(usr.currentPoint, destCoords);
+            }
+
+            // Find target waypoint along the road path
+            const targetIdx = routePath.findIndex(
+              (p) => p && typeof p.lat === 'number' && Math.hypot(p.lat - usr.currentPoint.lat, p.lng - usr.currentPoint.lng) > 0.00012
+            );
+
+            if (targetIdx === -1) {
+              // Reached final destination along the road! Pick next Abeokuta landmark & generate new road path
               const targetMarkerName = usr.activeDestinationName || 'destination';
-              addNotification(usr.name, usr.color, 'Marker Arrival', `${usr.name} reached ${targetMarkerName}!`);
+              const nextLoc = locValues[Math.floor(Math.random() * locValues.length)];
+              const newRoadPath = generateAbeokutaRoadPath(destCoords, { lat: nextLoc.lat, lng: nextLoc.lng });
+
+              addNotification(
+                usr.name,
+                usr.color,
+                'Marker Arrival',
+                `${usr.name} reached ${targetMarkerName} & en route to ${nextLoc.name}!`
+              );
+
+              // Asynchronously upgrade to exact Google Maps street polyline
+              fetchRealRoadPath(destCoords, { lat: nextLoc.lat, lng: nextLoc.lng })
+                .then((realPath) => {
+                  if (realPath && realPath.length > 3) {
+                    setAllUsers((prev) =>
+                      prev.map((u) => (u.id === usr.id ? { ...u, activeRoutePath: realPath } : u))
+                    );
+                  }
+                })
+                .catch((err) => console.warn('Road path upgrade warning:', err));
 
               return {
                 ...usr,
-                isNavigating: false,
-                isStationary: true,
-                dwellDurationSeconds: 95,
-                destinationName: undefined,
-                destinationCoords: undefined,
+                isNavigating: true,
+                isStationary: false,
+                mode: 'vehicle',
+                speedKmH: 22.0 + Math.random() * 15,
+                originName: targetMarkerName,
+                originCoords: destCoords,
+                activeDestinationName: nextLoc.name,
+                activeDestinationCoords: { lat: nextLoc.lat, lng: nextLoc.lng },
+                activeRoutePath: newRoadPath,
               };
             }
 
-            const stepRatio = 0.05;
-            const nextLat = usr.currentPoint.lat + dLat * stepRatio;
-            const nextLng = usr.currentPoint.lng + dLng * stepRatio;
+            // Step along the road segment towards the target waypoint
+            const targetPoint = routePath[targetIdx];
+            if (!targetPoint || typeof targetPoint.lat !== 'number' || typeof targetPoint.lng !== 'number') {
+              return usr;
+            }
+
+            const dLat = targetPoint.lat - usr.currentPoint.lat;
+            const dLng = targetPoint.lng - usr.currentPoint.lng;
+            const dist = Math.hypot(dLat, dLng);
+            const stepSize = 0.00022; // Smooth travel speed along road line
+            const ratio = dist > 0 ? Math.min(1, stepSize / dist) : 1;
+
+            const nextLat = usr.currentPoint.lat + dLat * ratio;
+            const nextLng = usr.currentPoint.lng + dLng * ratio;
 
             return {
               ...usr,
+              isNavigating: true,
+              mode: 'vehicle',
+              speedKmH: usr.speedKmH || 25.0,
+              activeRoutePath: routePath,
               currentPoint: {
                 ...usr.currentPoint,
                 lat: nextLat,
                 lng: nextLng,
-                speed: 18.5,
+                speed: usr.speedKmH || 25.0,
                 timestamp: Date.now(),
               },
             };
           } else {
-            // Small subtle jitter for live position indicator
-            const jitterLat = (Math.random() - 0.5) * 0.00008;
-            const jitterLng = (Math.random() - 0.5) * 0.00008;
+            // Assign next target in Abeokuta to keep in continuous vehicle motion along roads
+            const nextLoc = locValues[Math.floor(Math.random() * locValues.length)];
+            const newRoadPath = generateAbeokutaRoadPath(usr.currentPoint, { lat: nextLoc.lat, lng: nextLoc.lng });
             return {
               ...usr,
-              currentPoint: {
-                ...usr.currentPoint,
-                lat: usr.currentPoint.lat + jitterLat,
-                lng: usr.currentPoint.lng + jitterLng,
-                timestamp: Date.now(),
-              },
+              isNavigating: true,
+              isStationary: false,
+              mode: 'vehicle',
+              speedKmH: 24.0,
+              activeDestinationName: nextLoc.name,
+              activeDestinationCoords: { lat: nextLoc.lat, lng: nextLoc.lng },
+              activeRoutePath: newRoadPath,
             };
           }
         })
       );
-    }, 2500);
+    }, 1100);
 
     return () => clearInterval(interval);
   }, [addNotification]);
@@ -890,6 +1103,7 @@ export default function App() {
             selectedUserIdFilter={selectedUserIdFilter}
             contentTypeFilter={contentTypeFilter}
             timeRangeFilter={timeRangeFilter}
+            isSidebarCollapsed={isSidebarCollapsed}
             onSelectUserFilter={(userId) => setSelectedUserIdFilter(userId)}
             onSelectContentTypeFilter={(type) => setContentTypeFilter(type)}
             onSelectTimeRangeFilter={(range) => setTimeRangeFilter(range)}
@@ -950,33 +1164,14 @@ export default function App() {
               onStartNavigation={handleStartNavigation}
               onClearRoute={handleClearRoute}
               onSelectSegment={(id) => setSelectedSegmentId(id)}
-              onSelectPlace={(place) => {
-                setCurrentPoint({
-                  id: `focus-${place.id}`,
-                  lat: place.lat,
-                  lng: place.lng,
-                  accuracy: place.accuracy,
-                  speed: 0,
-                  speedMps: 0,
-                  timestamp: place.arrivedAt,
-                  timeString: new Date(place.arrivedAt).toLocaleTimeString(),
-                });
+              onSelectPlace={(_place) => {
+                setSelectedSegmentId(null);
               }}
-              onSelectCustomMarker={(marker) => {
-                setCurrentPoint({
-                  id: `focus-${marker.id}`,
-                  lat: marker.lat,
-                  lng: marker.lng,
-                  accuracy: 10,
-                  speed: 0,
-                  speedMps: 0,
-                  timestamp: marker.createdAt,
-                  timeString: new Date(marker.createdAt).toLocaleTimeString(),
-                });
+              onSelectCustomMarker={(_marker) => {
+                setSelectedSegmentId(null);
               }}
               onEditCustomMarker={handleEditCustomMarker}
               onDeleteCustomMarker={handleDeleteCustomMarker}
-              onEditStayPointAsMarker={handleEditStayPointAsMarker}
               onRequestRoute={handleRequestRoute}
               onSelectRoute={(id) => setSelectedRouteId(id)}
               onOpenDataSchema={() => setIsDataModalOpen(true)}

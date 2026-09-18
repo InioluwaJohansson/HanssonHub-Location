@@ -9,7 +9,14 @@ import {
   AppTheme,
   AppUser,
 } from '../types';
-import { createUserAvatarIcon, createPlaceMarkerIcon, formatDistance } from '../utils/geo';
+import {
+  createUserAvatarIcon,
+  createPlaceMarkerIcon,
+  getCachedUserAvatarIcon,
+  getCachedPlaceMarkerIcon,
+  calculateDistanceMeters,
+  formatDistance,
+} from '../utils/geo';
 
 interface MapOverlaysProps {
   segments: JourneySegment[];
@@ -17,16 +24,16 @@ interface MapOverlaysProps {
   recordedPlaces: RecordedPlace[];
   customMarkers: CustomMarker[];
   routes: RouteOption[];
-  selectedRouteId: string | null;
-  selectedSegmentId: string | null;
+  selectedRouteId: number | null;
+  selectedSegmentId: number | null;
   userName?: string;
   isNavigating?: boolean;
   theme?: AppTheme;
   allUsers?: AppUser[];
-  selectedUserIdFilter?: string;
+  selectedUserIdFilter?: number | 'all';
   onSelectPlace?: (place: RecordedPlace) => void;
   onSelectCustomMarker?: (marker: CustomMarker) => void;
-  onSelectRoute?: (routeId: string) => void;
+  onSelectRoute?: (routeId: number) => void;
   onMapClick?: (coords: { lat: number; lng: number }) => void;
   onUserPannedMap?: () => void;
 }
@@ -356,92 +363,123 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
     };
   }, [map, routes, selectedRouteId, isNavigating, isDark, onSelectRoute]);
 
-  // Sync Recorded Places Markers (only locations where stationary dwell >= 90 seconds (1m 30s))
+  const placeMarkersMapRef = useRef<Map<number, google.maps.Marker>>(new Map());
+  const customMarkersMapRef = useRef<Map<number, google.maps.Marker>>(new Map());
+
+  // Sync Recorded Places Markers (anti-blinking in-place updates)
   useEffect(() => {
     if (!map || typeof google === 'undefined' || !google.maps) return;
 
-    placeMarkersRef.current.forEach((m) => m.setMap(null));
-    placeMarkersRef.current = [];
-
-    // Strictly enforce: Do not show on the map until the 1m 30s has elapsed
+    // Strictly enforce: Do not show on the map until the 1m 30s dwell duration has elapsed
     const visiblePlaces = recordedPlaces.filter((p) => p.dwellDurationSeconds >= 90);
+    const activePlaceIds = new Set<number>();
 
     visiblePlaces.forEach((place) => {
-      const iconData = createPlaceMarkerIcon(place.category || 'generic', true, place.userColor);
-      const marker = new google.maps.Marker({
-        position: { lat: place.lat, lng: place.lng },
-        map: map,
-        title: `${place.name || 'Recorded Place'} (${place.userName || userName})`,
-        icon: {
-          url: iconData.url,
-          scaledSize: iconData.scaledSize,
-          anchor: iconData.anchor,
-        },
-        zIndex: 25,
-      });
+      activePlaceIds.add(place.id);
+      const iconData = getCachedPlaceMarkerIcon(place.category || 'generic', true, place.userColor);
+      let marker = placeMarkersMapRef.current.get(place.id);
 
-      marker.addListener('click', () => {
-        if (onSelectPlace) {
-          onSelectPlace(place);
+      if (!marker) {
+        marker = new google.maps.Marker({
+          position: { lat: place.lat, lng: place.lng },
+          map: map,
+          title: `${place.name || 'Recorded Place'} (${place.userName || userName})`,
+          icon: {
+            url: iconData.url,
+            scaledSize: iconData.scaledSize,
+            anchor: iconData.anchor,
+          },
+          zIndex: 25,
+        });
+
+        marker.addListener('click', () => {
+          if (onSelectPlace) {
+            onSelectPlace(place);
+          }
+        });
+
+        placeMarkersMapRef.current.set(place.id, marker);
+      } else {
+        marker.setMap(map);
+        const curPos = marker.getPosition();
+        if (!curPos || curPos.lat() !== place.lat || curPos.lng() !== place.lng) {
+          marker.setPosition({ lat: place.lat, lng: place.lng });
         }
-      });
-
-      placeMarkersRef.current.push(marker);
+      }
     });
 
-    return () => {
-      placeMarkersRef.current.forEach((m) => m.setMap(null));
-      placeMarkersRef.current = [];
-    };
+    placeMarkersMapRef.current.forEach((marker, id) => {
+      if (!activePlaceIds.has(id)) {
+        marker.setMap(null);
+        placeMarkersMapRef.current.delete(id);
+      }
+    });
   }, [map, recordedPlaces, userName, onSelectPlace]);
 
-  // Sync Custom Markers added by users
+  // Sync Custom Markers added by users (anti-blinking in-place updates)
   useEffect(() => {
     if (!map || typeof google === 'undefined' || !google.maps) return;
 
-    customMarkersRef.current.forEach((m) => m.setMap(null));
-    customMarkersRef.current = [];
+    const activeMarkerIds = new Set<number>();
 
     customMarkers.forEach((cm) => {
-      const iconData = createPlaceMarkerIcon(cm.category, false, cm.userColor);
-      const marker = new google.maps.Marker({
-        position: { lat: cm.lat, lng: cm.lng },
-        map: map,
-        title: `${cm.name} (${cm.userName || userName})`,
-        icon: {
-          url: iconData.url,
-          scaledSize: iconData.scaledSize,
-          anchor: iconData.anchor,
-        },
-        zIndex: 28,
-      });
+      activeMarkerIds.add(cm.id);
+      const iconData = getCachedPlaceMarkerIcon(cm.category, false, cm.userColor);
+      let marker = customMarkersMapRef.current.get(cm.id);
 
-      marker.addListener('click', () => {
-        if (onSelectCustomMarker) {
-          onSelectCustomMarker(cm);
+      if (!marker) {
+        marker = new google.maps.Marker({
+          position: { lat: cm.lat, lng: cm.lng },
+          map: map,
+          title: `${cm.name} (Tied to: ${cm.userName || userName})`,
+          icon: {
+            url: iconData.url,
+            scaledSize: iconData.scaledSize,
+            anchor: iconData.anchor,
+          },
+          zIndex: 28,
+        });
+
+        marker.addListener('click', () => {
+          if (onSelectCustomMarker) {
+            onSelectCustomMarker(cm);
+          }
+        });
+
+        customMarkersMapRef.current.set(cm.id, marker);
+      } else {
+        marker.setMap(map);
+        const curPos = marker.getPosition();
+        if (!curPos || curPos.lat() !== cm.lat || curPos.lng() !== cm.lng) {
+          marker.setPosition({ lat: cm.lat, lng: cm.lng });
         }
-      });
-
-      customMarkersRef.current.push(marker);
+      }
     });
 
-    return () => {
-      customMarkersRef.current.forEach((m) => m.setMap(null));
-      customMarkersRef.current = [];
-    };
+    customMarkersMapRef.current.forEach((marker, id) => {
+      if (!activeMarkerIds.has(id)) {
+        marker.setMap(null);
+        customMarkersMapRef.current.delete(id);
+      }
+    });
   }, [map, customMarkers, userName, onSelectCustomMarker]);
 
   // Multi-User Markers: Render all active users on the map with their distinct colors and avatar icons
-  const userMarkersRef = useRef<Map<string, google.maps.Marker>>(new Map());
+  const userMarkersRef = useRef<Map<number, google.maps.Marker>>(new Map());
+  const userMarkerIconKeysRef = useRef<Map<number, string>>(new Map());
+  const lastVisualPositionsRef = useRef<Map<number | string, { lat: number; lng: number }>>(new Map());
+  const userInfoWindowRef = useRef<google.maps.InfoWindow | null>(null);
 
+  // Synchronize User Avatars smoothly with anti-flicker icon cache and continuous dynamic movement
   useEffect(() => {
     if (!map || typeof google === 'undefined' || !google.maps) return;
 
     if (!allUsers || allUsers.length === 0) {
       // Fallback single-user rendering if allUsers is empty
-      if (currentPoint) {
+      if (currentPoint && typeof currentPoint.lat === 'number' && typeof currentPoint.lng === 'number') {
         const pos = { lat: currentPoint.lat, lng: currentPoint.lng };
-        const avatarIcon = createUserAvatarIcon(userName, '#3B82F6');
+        const avatarIcon = getCachedUserAvatarIcon(userName, '#3B82F6');
+
         if (!currentMarkerRef.current) {
           currentMarkerRef.current = new google.maps.Marker({
             position: pos,
@@ -450,8 +488,10 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
             icon: { url: avatarIcon.url, scaledSize: avatarIcon.scaledSize, anchor: avatarIcon.anchor },
             zIndex: 50,
           });
+          lastVisualPositionsRef.current.set('single-user', pos);
         } else {
           currentMarkerRef.current.setPosition(pos);
+          lastVisualPositionsRef.current.set('single-user', pos);
         }
       }
       return;
@@ -463,23 +503,29 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
       currentMarkerRef.current = null;
     }
 
-    const currentActiveIds = new Set<string>();
+    const currentActiveIds = new Set<number>();
     const usersToRender =
       selectedUserIdFilter && selectedUserIdFilter !== 'all'
-        ? allUsers.filter((u) => u.id === selectedUserIdFilter)
-        : allUsers;
+        ? allUsers.filter((u) => u && u.id === selectedUserIdFilter)
+        : allUsers.filter(Boolean);
 
     usersToRender.forEach((user) => {
+      if (!user || !user.currentPoint || typeof user.currentPoint.lat !== 'number' || typeof user.currentPoint.lng !== 'number') {
+        return;
+      }
+
       currentActiveIds.add(user.id);
       const pos = { lat: user.currentPoint.lat, lng: user.currentPoint.lng };
-      const avatarIcon = createUserAvatarIcon(user.name, user.color);
+      const iconKey = `${user.name}_${user.color || '#3B82F6'}_${user.avatar || 'none'}`;
+      const avatarIcon = getCachedUserAvatarIcon(user.name, user.color || '#3B82F6', user.avatar);
+      const titleText = `${user.name} | From: ${user.originName || 'Starting Point'} ➔ To: ${user.activeDestinationName || 'Destination'} (${(user.speedKmH || 0).toFixed(1)} km/h)`;
 
       let marker = userMarkersRef.current.get(user.id);
       if (!marker) {
         marker = new google.maps.Marker({
           position: pos,
           map: map,
-          title: `${user.name} (${user.speedKmH.toFixed(1)} km/h)`,
+          title: titleText,
           icon: {
             url: avatarIcon.url,
             scaledSize: avatarIcon.scaledSize,
@@ -487,16 +533,52 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
           },
           zIndex: user.isCurrentUser ? 60 : 40,
         });
+
+        userMarkerIconKeysRef.current.set(user.id, iconKey);
+        lastVisualPositionsRef.current.set(user.id, pos);
+
+        marker.addListener('click', () => {
+          if (!userInfoWindowRef.current) {
+            userInfoWindowRef.current = new google.maps.InfoWindow();
+          }
+          const contentString = `
+            <div style="font-family: system-ui, -apple-system, sans-serif; padding: 6px 10px; max-width: 240px; color: #18181b;">
+              <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+                <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: ${user.color};"></span>
+                <strong style="font-size: 13px; font-weight: 700;">${user.name}</strong>
+              </div>
+              <div style="font-size: 11px; line-height: 1.4; color: #3f3f46;">
+                <p style="margin: 2px 0;"><strong>Start:</strong> ${user.originName || 'Known Landmark'}</p>
+                <p style="margin: 2px 0;"><strong>Destination:</strong> ${user.activeDestinationName || 'En route destination'}</p>
+                <p style="margin: 2px 0;"><strong>Speed:</strong> ${(user.speedKmH || 0).toFixed(1)} km/h (${user.mode})</p>
+              </div>
+            </div>
+          `;
+          userInfoWindowRef.current.setContent(contentString);
+          userInfoWindowRef.current.open(map, marker);
+        });
+
         userMarkersRef.current.set(user.id, marker);
       } else {
         marker.setMap(map);
+
+        // Anti-blinking: ONLY setIcon if the user's color, name, or avatar actually changed!
+        if (userMarkerIconKeysRef.current.get(user.id) !== iconKey) {
+          marker.setIcon({
+            url: avatarIcon.url,
+            scaledSize: avatarIcon.scaledSize,
+            anchor: avatarIcon.anchor,
+          });
+          userMarkerIconKeysRef.current.set(user.id, iconKey);
+        }
+
+        // Dynamically update marker position seamlessly on every movement tick
         marker.setPosition(pos);
-        marker.setIcon({
-          url: avatarIcon.url,
-          scaledSize: avatarIcon.scaledSize,
-          anchor: avatarIcon.anchor,
-        });
-        marker.setTitle(`${user.name} (${user.speedKmH.toFixed(1)} km/h)`);
+        lastVisualPositionsRef.current.set(user.id, pos);
+
+        if (marker.getTitle() !== titleText) {
+          marker.setTitle(titleText);
+        }
       }
     });
 
@@ -505,6 +587,8 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
       if (!currentActiveIds.has(userId)) {
         marker.setMap(null);
         userMarkersRef.current.delete(userId);
+        userMarkerIconKeysRef.current.delete(userId);
+        lastVisualPositionsRef.current.delete(userId);
       }
     });
   }, [map, allUsers, selectedUserIdFilter, currentPoint, userName]);
