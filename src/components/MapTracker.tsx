@@ -40,8 +40,17 @@ import {
   ChevronDown,
   Globe,
   Loader2,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
-import { formatDistance, formatDuration } from '../utils/geo';
+import { formatDistance, formatDuration, calculateDistanceMeters } from '../utils/geo';
+import {
+  speakVoice,
+  isVoiceMuted,
+  setVoiceMuted,
+  formatVoiceDistance,
+  VOICE_THRESHOLDS,
+} from '../utils/voiceNavigation';
 
 interface MapTrackerProps {
   apiKey: string;
@@ -199,6 +208,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
 }) => {
   const [mapType, setMapType] = useState<'roadmap' | 'satellite' | 'terrain'>('roadmap');
   const [recenterCount, setRecenterCount] = useState<number>(0);
+  const [mapCameraTarget, setMapCameraTarget] = useState<{ lat: number; lng: number } | null>(null);
 
   // References for container and HUD sizing
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -433,13 +443,96 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
   // Currently active route (either selected or fastest default)
   const activeRoute = routes.find((r) => r.id === selectedRouteId) || routes[0];
 
+  // Voice Navigation State & Spoken Thresholds Ref
+  const [isVoiceMutedState, setIsVoiceMutedState] = useState<boolean>(isVoiceMuted());
+  const spokenThresholdsRef = useRef<Set<number>>(new Set());
+  const prevNavigatingRef = useRef<boolean>(false);
+
+  // Toggle voice navigation
+  const handleToggleVoice = useCallback(() => {
+    const nextMuted = !isVoiceMutedState;
+    setIsVoiceMutedState(nextMuted);
+    setVoiceMuted(nextMuted);
+    if (!nextMuted) {
+      speakVoice('Voice navigation enabled.', true);
+    }
+  }, [isVoiceMutedState]);
+
+  // Turn-by-Turn Voice Navigation Guidance Effect (50m, 100m, 200m, 500m, 1km thresholds)
+  useEffect(() => {
+    // When navigation starts (transitions from false -> true)
+    if (isNavigating && !prevNavigatingRef.current) {
+      spokenThresholdsRef.current.clear();
+      const destName = activeDestinationName || 'Destination';
+      const firstStep = activeRoute?.steps?.[0] || 'Proceed along the highlighted route';
+      speakVoice(`Navigation started to ${destName}. ${firstStep}.`);
+    }
+    prevNavigatingRef.current = isNavigating;
+
+    if (!isNavigating) {
+      spokenThresholdsRef.current.clear();
+      return;
+    }
+
+    // Determine current remaining distance
+    const totalDistance = activeRoute?.distanceMeters || 1200;
+    let remainingMeters = totalDistance;
+
+    if (countdownSecondsRemaining !== undefined && countdownSecondsRemaining !== null) {
+      const durationSec = activeRoute?.durationSeconds || 180;
+      const ratio = Math.max(0, countdownSecondsRemaining) / Math.max(1, durationSec);
+      remainingMeters = Math.round(totalDistance * ratio);
+    } else if (currentPoint && activeRoute?.path && activeRoute.path.length > 0) {
+      const destPt = activeRoute.path[activeRoute.path.length - 1];
+      remainingMeters = calculateDistanceMeters(
+        currentPoint.lat,
+        currentPoint.lng,
+        destPt.lat,
+        destPt.lng
+      );
+    }
+
+    const stepText = activeRoute?.steps?.[0] || 'turn towards your destination';
+
+    // Voice announcements for exact thresholds: 1km (1000m), 500m, 200m, 100m, 50m
+    VOICE_THRESHOLDS.forEach((threshold) => {
+      const upperLimit = threshold === 1000 ? 1100 : threshold * 1.15;
+      const lowerLimit = threshold * 0.75;
+
+      if (remainingMeters <= upperLimit && remainingMeters >= lowerLimit) {
+        if (!spokenThresholdsRef.current.has(threshold)) {
+          spokenThresholdsRef.current.add(threshold);
+          const distPhrase = formatVoiceDistance(threshold);
+          speakVoice(`In ${distPhrase}, ${stepText}`);
+        }
+      }
+    });
+
+    // Destination arrival voice prompt
+    if (remainingMeters <= 20 && !spokenThresholdsRef.current.has(0)) {
+      spokenThresholdsRef.current.add(0);
+      const destName = activeDestinationName || 'Destination';
+      speakVoice(`You have arrived at your destination: ${destName}.`);
+    }
+  }, [
+    isNavigating,
+    countdownSecondsRemaining,
+    activeRoute,
+    activeDestinationName,
+    currentPoint,
+  ]);
+
   const handlePlaceClick = (place: RecordedPlace) => {
     onSelectPlace(place);
+    setMapCameraTarget({ lat: place.lat, lng: place.lng });
+    setRecenterCount((c) => c + 1);
     onRequestRoute({ lat: place.lat, lng: place.lng }, place.name || 'Recorded Place');
   };
 
   const handleCustomMarkerClick = (marker: CustomMarker) => {
     onSelectCustomMarker(marker);
+    setMapCameraTarget({ lat: marker.lat, lng: marker.lng });
+    setRecenterCount((c) => c + 1);
     onRequestRoute({ lat: marker.lat, lng: marker.lng }, marker.name);
   };
 
@@ -482,6 +575,9 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
   };
 
   const handleRecenter = () => {
+    if (currentPoint) {
+      setMapCameraTarget({ lat: currentPoint.lat, lng: currentPoint.lng });
+    }
     setRecenterCount((c) => c + 1);
   };
 
@@ -529,7 +625,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
             onMapClick={handleMapClick}
           />
           <MapCameraController
-            targetPoint={currentPoint ? { lat: currentPoint.lat, lng: currentPoint.lng } : null}
+            targetPoint={mapCameraTarget || (currentPoint ? { lat: currentPoint.lat, lng: currentPoint.lng } : null)}
             triggerCenter={recenterCount}
             routes={routes}
           />
@@ -598,6 +694,8 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
               type="button"
               id="search-plot-route-btn"
               onClick={() => {
+                setMapCameraTarget({ lat: selectedSearchLocation.lat, lng: selectedSearchLocation.lng });
+                setRecenterCount((c) => c + 1);
                 onRequestRoute(
                   { lat: selectedSearchLocation.lat, lng: selectedSearchLocation.lng },
                   selectedSearchLocation.name
@@ -630,6 +728,8 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
                     setSearchLocationQuery(loc.name);
                     setSelectedSearchLocation(loc);
                     setIsAutocompleteOpen(false);
+                    setMapCameraTarget({ lat: loc.lat, lng: loc.lng });
+                    setRecenterCount((c) => c + 1);
                   }}
                   className={`w-full px-3 py-2 text-left flex items-start gap-2.5 hover:bg-blue-500/10 transition cursor-pointer border-b border-zinc-100 dark:border-zinc-800/50 last:border-0 ${
                     selectedSearchLocation?.id === loc.id ? 'bg-blue-500/15' : ''
@@ -858,24 +958,34 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
             >
-              {/* Top Controls: Maximize & Close */}
+              {/* Top Controls: Voice Mute, Maximize & Close */}
               <div className="flex items-center justify-between w-full">
                 <button
-                  id="maximize-nav-hud-btn"
-                  onClick={() => setIsHudMinimized(false)}
-                  className="p-1 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-300 transition cursor-pointer"
-                  title="Expand Guidance"
+                  id="toggle-voice-nav-min-btn"
+                  onClick={handleToggleVoice}
+                  className="p-1 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 text-blue-500 transition cursor-pointer"
+                  title={isVoiceMutedState ? 'Unmute Voice Navigation' : 'Mute Voice Navigation'}
                 >
-                  <Maximize2 className="w-3.5 h-3.5" />
+                  {isVoiceMutedState ? <VolumeX className="w-3.5 h-3.5 text-zinc-400" /> : <Volume2 className="w-3.5 h-3.5 text-blue-500" />}
                 </button>
-                <button
-                  id="exit-nav-hud-btn"
-                  onClick={onClearRoute}
-                  className="p-1 rounded-lg hover:bg-red-500/20 text-red-500 transition cursor-pointer"
-                  title="Cancel Route"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    id="maximize-nav-hud-btn"
+                    onClick={() => setIsHudMinimized(false)}
+                    className="p-1 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-600 dark:text-zinc-300 transition cursor-pointer"
+                    title="Expand Guidance"
+                  >
+                    <Maximize2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    id="exit-nav-hud-btn"
+                    onClick={onClearRoute}
+                    className="p-1 rounded-lg hover:bg-red-500/20 text-red-500 transition cursor-pointer"
+                    title={isNavigating ? 'Cancel Active Route' : 'Close Preview'}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
 
               {/* Direction Turn Icon & Text */}
@@ -922,14 +1032,26 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
                 onPointerMove={handlePointerMove}
                 onPointerUp={handlePointerUp}
               >
-                <div className="flex items-center gap-1.5 text-zinc-400 text-xs font-medium">
-                  <GripHorizontal className="w-4 h-4" />
+                <div className="flex items-center gap-1.5 text-zinc-600 dark:text-zinc-300 text-xs font-semibold">
+                  <GripHorizontal className="w-4 h-4 text-zinc-400" />
                   <span>Drag Guidance HUD</span>
-                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-zinc-200/60 dark:bg-zinc-800/80 text-zinc-500 font-semibold">
-                    70% Map Area
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-zinc-200/80 dark:bg-zinc-800/90 text-zinc-700 dark:text-zinc-300 font-bold">
+                    Visible Map Area
                   </span>
                 </div>
                 <div className="flex items-center gap-1">
+                  <button
+                    id="toggle-voice-nav-exp-btn"
+                    onClick={handleToggleVoice}
+                    className="p-1 rounded-lg text-blue-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer"
+                    title={isVoiceMutedState ? 'Unmute Voice Navigation' : 'Mute Voice Navigation'}
+                  >
+                    {isVoiceMutedState ? (
+                      <VolumeX className="w-4 h-4 text-zinc-400" />
+                    ) : (
+                      <Volume2 className="w-4 h-4 text-blue-500 animate-pulse" />
+                    )}
+                  </button>
                   <button
                     id="minimize-nav-hud-btn"
                     onClick={() => setIsHudMinimized(true)}
@@ -942,7 +1064,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
                     id="exit-navigation-btn"
                     onClick={onClearRoute}
                     className="p-1 rounded-lg text-zinc-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition cursor-pointer"
-                    title="Exit Directions"
+                    title={isNavigating ? 'Cancel Active Route' : 'Close Preview'}
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -954,7 +1076,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
                   <Navigation className="w-5 h-5 fill-white animate-pulse" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span
                       className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
                         isNavigating
@@ -966,6 +1088,10 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
                     </span>
                     <span className="text-xs font-semibold text-zinc-500 truncate">
                       {activeDestinationName ? `To: ${activeDestinationName}` : 'Destination'}
+                    </span>
+                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-blue-500 dark:text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded-md">
+                      {isVoiceMutedState ? <VolumeX className="w-3 h-3 text-zinc-400" /> : <Volume2 className="w-3 h-3 text-blue-500" />}
+                      <span>Voice {isVoiceMutedState ? 'Off' : 'On'}</span>
                     </span>
                   </div>
                   <h3 className="text-sm font-bold mt-1 text-zinc-900 dark:text-zinc-50 leading-snug">
@@ -1023,7 +1149,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
         </div>
       )}
 
-      {/* Start Button Controls */}
+      {/* Start Button Controls (Route Planned - Navigation Not Started) */}
       {routes.length > 0 && !isNavigating && (
         <div
           id="start-route-controls"
@@ -1032,22 +1158,27 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
           <button
             id="start-directions-btn"
             onClick={onStartNavigation}
-            className="flex items-center gap-2.5 px-7 py-3 rounded-full bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold text-sm shadow-xl hover:shadow-2xl transition border border-blue-400/40 cursor-pointer"
+            className="flex items-center gap-2.5 px-8 py-3 rounded-full bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold text-sm shadow-xl hover:shadow-2xl transition border border-blue-400/40 cursor-pointer"
           >
             <Navigation className="w-4 h-4 fill-white" />
             <span>Start Route</span>
           </button>
+        </div>
+      )}
+
+      {/* Active Route Cancellation Controls (Available only AFTER route has started) */}
+      {routes.length > 0 && isNavigating && (
+        <div
+          id="active-route-controls"
+          className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 pointer-events-auto select-none animate-in fade-in slide-in-from-bottom-3 duration-200"
+        >
           <button
-            id="cancel-route-btn"
+            id="cancel-active-route-btn"
             onClick={onClearRoute}
-            className={`p-3 rounded-full border shadow-xl transition active:scale-95 cursor-pointer ${
-              isDark
-                ? 'bg-zinc-900/90 border-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-800'
-                : 'bg-white/95 border-zinc-300 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-50'
-            }`}
-            title="Cancel Route"
+            className="flex items-center gap-2 px-6 py-2.5 rounded-full bg-rose-600 hover:bg-rose-700 active:scale-95 text-white font-bold text-xs shadow-xl transition cursor-pointer border border-rose-400/40"
           >
             <X className="w-4 h-4" />
+            <span>Cancel Active Route</span>
           </button>
         </div>
       )}

@@ -27,6 +27,7 @@ export interface AppUser {
   name: string;
   avatar: string;
   color: string;
+  role?: string;
   isCurrentUser: boolean;
   currentPoint: LocationPoint;
   isTracking: boolean;

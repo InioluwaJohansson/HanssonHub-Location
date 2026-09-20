@@ -464,11 +464,62 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
     });
   }, [map, customMarkers, userName, onSelectCustomMarker]);
 
-  // Multi-User Markers: Render all active users on the map with their distinct colors and avatar icons
+  // Multi-User Markers & Active Route Lines: Render all active users and their active route paths
   const userMarkersRef = useRef<Map<number, google.maps.Marker>>(new Map());
   const userMarkerIconKeysRef = useRef<Map<number, string>>(new Map());
   const lastVisualPositionsRef = useRef<Map<number | string, { lat: number; lng: number }>>(new Map());
+  const userRoutePolylinesRef = useRef<Map<number, google.maps.Polyline>>(new Map());
   const userInfoWindowRef = useRef<google.maps.InfoWindow | null>(null);
+
+  // Synchronize User Active Route Polylines (from start location to destination)
+  useEffect(() => {
+    if (!map || typeof google === 'undefined' || !google.maps) return;
+
+    const activeUserIdsWithRoute = new Set<number>();
+    const usersToRender =
+      selectedUserIdFilter && selectedUserIdFilter !== 'all'
+        ? (allUsers || []).filter((u) => u && u.id === selectedUserIdFilter)
+        : (allUsers || []).filter(Boolean);
+
+    usersToRender.forEach((user) => {
+      if (user && user.activeRoutePath && user.activeRoutePath.length > 1) {
+        activeUserIdsWithRoute.add(user.id);
+
+        let polyline = userRoutePolylinesRef.current.get(user.id);
+        if (!polyline) {
+          polyline = new google.maps.Polyline({
+            path: user.activeRoutePath,
+            strokeColor: user.color || '#3B82F6',
+            strokeOpacity: 0.85,
+            strokeWeight: 5,
+            map: map,
+            zIndex: user.isCurrentUser ? 42 : 36,
+          });
+          userRoutePolylinesRef.current.set(user.id, polyline);
+        } else {
+          polyline.setMap(map);
+          polyline.setPath(user.activeRoutePath);
+          polyline.setOptions({
+            strokeColor: user.color || '#3B82F6',
+            strokeOpacity: 0.85,
+            strokeWeight: 5,
+          });
+        }
+      }
+    });
+
+    userRoutePolylinesRef.current.forEach((polyline, userId) => {
+      if (!activeUserIdsWithRoute.has(userId)) {
+        polyline.setMap(null);
+        userRoutePolylinesRef.current.delete(userId);
+      }
+    });
+
+    return () => {
+      userRoutePolylinesRef.current.forEach((polyline) => polyline.setMap(null));
+      userRoutePolylinesRef.current.clear();
+    };
+  }, [map, allUsers, selectedUserIdFilter]);
 
   // Synchronize User Avatars smoothly with anti-flicker icon cache and continuous dynamic movement
   useEffect(() => {
@@ -541,16 +592,45 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
           if (!userInfoWindowRef.current) {
             userInfoWindowRef.current = new google.maps.InfoWindow();
           }
+
+          const bgColor = isDark ? '#09090b' : '#ffffff';
+          const textColor = isDark ? '#f4f4f5' : '#18181b';
+          const cardBg = isDark ? '#18181b' : '#f4f4f5';
+          const subTextColor = isDark ? '#a1a1aa' : '#71717a';
+          const borderColor = isDark ? '#27272a' : '#e4e4e7';
+          const userAvatar = user.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(user.name)}&background=3b82f6&color=fff`;
+
           const contentString = `
-            <div style="font-family: system-ui, -apple-system, sans-serif; padding: 6px 10px; max-width: 240px; color: #18181b;">
-              <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
-                <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: ${user.color};"></span>
-                <strong style="font-size: 13px; font-weight: 700;">${user.name}</strong>
+            <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; max-width: 250px; background-color: ${bgColor}; color: ${textColor}; border-radius: 16px; border: 1px solid ${borderColor}; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3);">
+              <!-- User Avatar Centered on Top -->
+              <div style="text-align: center; margin-bottom: 8px;">
+                <img src="${userAvatar}" alt="${user.name}" style="width: 52px; height: 52px; border-radius: 50%; object-fit: cover; margin: 0 auto; border: 3px solid ${user.color || '#3b82f6'}; box-shadow: 0 4px 8px rgba(0,0,0,0.2);" />
               </div>
-              <div style="font-size: 11px; line-height: 1.4; color: #3f3f46;">
-                <p style="margin: 2px 0;"><strong>Start:</strong> ${user.originName || 'Known Landmark'}</p>
-                <p style="margin: 2px 0;"><strong>Destination:</strong> ${user.activeDestinationName || 'En route destination'}</p>
-                <p style="margin: 2px 0;"><strong>Speed:</strong> ${(user.speedKmH || 0).toFixed(1)} km/h (${user.mode})</p>
+              
+              <!-- User Name & Role Badge -->
+              <div style="text-align: center; margin-bottom: 10px;">
+                <div style="font-size: 14px; font-weight: 800; color: ${textColor}; line-height: 1.2;">${user.name}</div>
+                <div style="margin-top: 3px;">
+                  <span style="display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 700; background-color: ${user.color || '#3b82f6'}20; color: ${user.color || '#3b82f6'}; border: 1px solid ${user.color || '#3b82f6'}40;">
+                    ${user.role || 'Traveler'}
+                  </span>
+                </div>
+              </div>
+
+              <!-- Location & Trip Details Card -->
+              <div style="background-color: ${cardBg}; border-radius: 12px; padding: 10px; font-size: 11px; line-height: 1.5; border: 1px solid ${borderColor};">
+                <div style="margin-bottom: 4px; color: ${textColor};">
+                  <strong style="color: ${subTextColor}; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; display: block;">From</strong>
+                  ${user.originName || 'Starting Point'}
+                </div>
+                <div style="margin-bottom: 4px; color: ${textColor};">
+                  <strong style="color: ${subTextColor}; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; display: block;">Destination</strong>
+                  ${user.activeDestinationName || 'En route destination'}
+                </div>
+                <div style="color: ${textColor}; padding-top: 2px;">
+                  <strong style="color: ${subTextColor}; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; display: block;">Current Speed</strong>
+                  <span style="font-weight: 700; color: ${user.color || '#3b82f6'};">${(user.speedKmH || 0).toFixed(1)} km/h</span> (${user.mode})
+                </div>
               </div>
             </div>
           `;
@@ -591,7 +671,7 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
         lastVisualPositionsRef.current.delete(userId);
       }
     });
-  }, [map, allUsers, selectedUserIdFilter, currentPoint, userName]);
+  }, [map, allUsers, selectedUserIdFilter, currentPoint, userName, isDark]);
 
   return null;
 };

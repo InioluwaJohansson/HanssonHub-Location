@@ -104,21 +104,6 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
           )}
         </button>
 
-        {/* Fast-forward 90s stay simulator button */}
-        <button
-          id="fastforward-dwell-btn"
-          onClick={onFastForwardDwell}
-          className={`px-2.5 py-1.5 rounded-xl font-medium flex items-center gap-1.5 border transition ${
-            isDark
-              ? 'bg-zinc-800/80 hover:bg-zinc-750 text-zinc-300 border-zinc-700'
-              : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700 border-zinc-300'
-          }`}
-          title="Simulate staying stationary for 90 seconds to trigger place recording"
-        >
-          <Clock className="w-3.5 h-3.5 text-zinc-400" />
-          <span className="hidden sm:inline">Simulate 90s Stay</span>
-        </button>
-
         {/* Data Collected Schema button */}
         <button
           id="data-collected-modal-btn"
