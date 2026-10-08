@@ -134,6 +134,11 @@ export function getInitialDemoUsers(): AppUser[] {
       { lat: destLoc.lat, lng: destLoc.lng }
     );
 
+    const userMode: 'walking' | 'vehicle' | 'airplane' =
+      idx === 2 ? 'walking' : idx === 4 ? 'airplane' : 'vehicle';
+    const userSpeed =
+      userMode === 'walking' ? 4.8 : userMode === 'airplane' ? 520.0 : 28.0 + (idx % 5) * 4.5;
+
     return {
       id: prof.id,
       name: prof.name,
@@ -148,8 +153,8 @@ export function getInitialDemoUsers(): AppUser[] {
         lat: startLoc.lat,
         lng: startLoc.lng,
         accuracy: 8,
-        speed: 18.0,
-        speedMps: 5.0,
+        speed: userSpeed,
+        speedMps: userSpeed / 3.6,
         timestamp: now,
         timeString: new Date().toLocaleTimeString(),
       },
@@ -164,8 +169,8 @@ export function getInitialDemoUsers(): AppUser[] {
       activeRoutePath: initialRoutePath,
       isNavigating: true,
       navigationStartTime: now - 60000 * (idx + 1),
-      speedKmH: 18.0 + (idx % 5) * 2.5,
-      mode: 'vehicle',
+      speedKmH: userSpeed,
+      mode: userMode,
     };
   });
 }

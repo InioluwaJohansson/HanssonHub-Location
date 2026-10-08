@@ -36,10 +36,12 @@ export function calculateDistanceMeters(
 }
 
 /**
- * Speed threshold: Trekking (walking/running/hiking) is <= 15 km/h (4.17 m/s).
- * Anything above 15 km/h is classified as Moving Vehicle.
+ * Speed threshold: Walking (running/hiking) is <= 15 km/h (4.17 m/s).
+ * Vehicle transit is between 15 km/h and 200 km/h.
+ * Airplane flight transit is > 200 km/h.
  */
-export const TREKKING_SPEED_THRESHOLD_KMH = 15;
+export const WALKING_SPEED_THRESHOLD_KMH = 15;
+export const AIRPLANE_SPEED_THRESHOLD_KMH = 200;
 
 /**
  * Stationarity threshold in meters. If points are within this radius,
@@ -52,8 +54,14 @@ export const STATIONARY_RADIUS_METERS = 28;
  */
 export const STAY_RECORD_THRESHOLD_SECONDS = 90;
 
-export function classifyTravelMode(speedKmH: number): 'trekking' | 'vehicle' {
-  return speedKmH > TREKKING_SPEED_THRESHOLD_KMH ? 'vehicle' : 'trekking';
+export function classifyTravelMode(speedKmH: number): 'walking' | 'vehicle' | 'airplane' {
+  if (speedKmH > AIRPLANE_SPEED_THRESHOLD_KMH) {
+    return 'airplane';
+  }
+  if (speedKmH > WALKING_SPEED_THRESHOLD_KMH) {
+    return 'vehicle';
+  }
+  return 'walking';
 }
 
 export function formatSpeed(speedKmH: number): string {
@@ -448,7 +456,7 @@ export function generateSampleJourney(centerLat = 37.7749, centerLng = -122.4194
       distanceMeters: dist,
       durationSeconds: 20,
       averageSpeedKmH: offset.speed,
-      mode: 'trekking',
+      mode: 'walking',
       startTime: prev.timestamp,
       endTime: newPt.timestamp,
     });

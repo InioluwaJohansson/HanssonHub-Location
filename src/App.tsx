@@ -35,10 +35,25 @@ import {
   ABEOKUTA_LOCATIONS,
 } from './utils/users';
 import { safeLoadStorage, safeSaveStorage, STORAGE_KEYS } from './utils/storage';
+import { setNavigationActive } from './utils/voiceNavigation';
+import {
+  initSignalRConnection,
+  sendStartRouteSignal,
+  sendCancelRouteSignal,
+} from './utils/signalrClient';
+import { locationTrackerService } from './services/locationTrackerService';
 import { MapTracker } from './components/MapTracker';
 import { MovementLogs } from './components/MovementLogs';
 import { HeaderBar } from './components/HeaderBar';
-import { DataCollectedModal } from './components/DataCollectedModal';
+import { LoginOverlay } from './components/LoginOverlay';
+import { LogoutConfirmModal } from './components/LogoutConfirmModal';
+import {
+  getStoredAuthToken,
+  getStoredAuthUser,
+  getStoredAuthImageUrl,
+  clearStoredAuth,
+  AuthUserData,
+} from './utils/auth';
 import { AlertCircle, Map, Layers, ChevronLeft, ChevronRight, Bell } from 'lucide-react';
 
 export interface ToastNotification {
@@ -48,6 +63,8 @@ export interface ToastNotification {
   title: string;
   message: string;
   timestamp: number;
+  isCancelledType?: boolean;
+  isExiting?: boolean;
 }
 
 export default function App() {
@@ -58,16 +75,74 @@ export default function App() {
   // Theme
   const [theme, setTheme] = useState<AppTheme>('dark');
 
+  // Authentication & Session State
+  const [authToken, setAuthToken] = useState<string | null>(() => getStoredAuthToken());
+  const [authUser, setAuthUser] = useState<AuthUserData | null>(() => getStoredAuthUser());
+  const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(() => getStoredAuthImageUrl());
+  const [isLoginOverlayOpen, setIsLoginOverlayOpen] = useState<boolean>(
+    () => !getStoredAuthToken() || !getStoredAuthUser()
+  );
+  const [isLogoutModalOpen, setIsLogoutModalOpen] = useState<boolean>(false);
+
   // User Profile
-  const userName = 'Inioluwa';
+  const userName = authUser?.userName || 'inioluwa_johansson';
 
   // Multi-User Management
-  const [allUsers, setAllUsers] = useState<AppUser[]>(() => getInitialDemoUsers());
+  const [allUsers, setAllUsers] = useState<AppUser[]>(() => {
+    const users = getInitialDemoUsers();
+    const storedUser = getStoredAuthUser();
+    const storedImage = getStoredAuthImageUrl();
+    if (storedUser) {
+      return users.map((u) =>
+        u.id === 1 || u.isCurrentUser
+          ? {
+              ...u,
+              id: storedUser.id,
+              name: storedUser.userName,
+              avatar: storedImage || u.avatar,
+            }
+          : u
+      );
+    }
+    return users;
+  });
+
+  const handleLoginSuccess = (token: string, userData: AuthUserData, imageUrl: string) => {
+    setAuthToken(token);
+    setAuthUser(userData);
+    setUserAvatarUrl(imageUrl);
+    setIsLoginOverlayOpen(false);
+    setIsTracking(true); // Start live tracking upon successful login
+
+    // Update primary user details across active users list
+    setAllUsers((prevUsers) =>
+      prevUsers.map((u) =>
+        u.id === 1 || u.isCurrentUser
+          ? {
+              ...u,
+              id: userData.id,
+              name: userData.userName,
+              avatar: imageUrl,
+            }
+          : u
+      )
+    );
+  };
+
+  const handleLogoutConfirm = () => {
+    clearStoredAuth();
+    setAuthToken(null);
+    setAuthUser(null);
+    setUserAvatarUrl(null);
+    setIsLogoutModalOpen(false);
+    setIsLoginOverlayOpen(true);
+    setIsTracking(false); // Immediately stop live location recording upon logout
+  };
   const [selectedUserIdFilter, setSelectedUserIdFilter] = useState<number | 'all'>('all');
   const [contentTypeFilter, setContentTypeFilter] = useState<'all' | 'markers' | 'routes' | 'movements'>('all');
   const [timeRangeFilter, setTimeRangeFilter] = useState<'all' | '1w' | '2w' | '1m' | '3m' | '6m'>('1w');
   const [completedRoutes, setCompletedRoutes] = useState<CompletedRouteLog[]>(() =>
-    safeLoadStorage(STORAGE_KEYS.COMPLETED_ROUTES, INITIAL_COMPLETED_ROUTES)
+    safeLoadStorage(STORAGE_KEYS.COMPLETED_ROUTES, [])
   );
 
   // Toast Notifications state
@@ -86,13 +161,13 @@ export default function App() {
     safeLoadStorage(STORAGE_KEYS.SEGMENTS, [])
   );
   const [recordedPlaces, setRecordedPlaces] = useState<RecordedPlace[]>(() =>
-    safeLoadStorage(STORAGE_KEYS.RECORDED_PLACES, INITIAL_RECORDED_PLACES)
+    safeLoadStorage(STORAGE_KEYS.RECORDED_PLACES, [])
   );
   const [selectedSegmentId, setSelectedSegmentId] = useState<number | null>(null);
 
-  // Custom User Markers initialized to Abeokuta landmarks (tied to specific users)
+  // Custom User Markers initialized from backend or storage (fallback to demo if empty)
   const [customMarkers, setCustomMarkers] = useState<CustomMarker[]>(() =>
-    safeLoadStorage(STORAGE_KEYS.CUSTOM_MARKERS, INITIAL_DEMO_MARKERS)
+    safeLoadStorage(STORAGE_KEYS.CUSTOM_MARKERS, [])
   );
 
   // Suggested Routes & Alternatives
@@ -114,7 +189,6 @@ export default function App() {
   });
 
   // Modal and layout states
-  const [isDataModalOpen, setIsDataModalOpen] = useState<boolean>(false);
   const [geoError, setGeoError] = useState<string | null>(null);
   const [mobileActiveView, setMobileActiveView] = useState<'map' | 'logs'>('map');
 
@@ -163,11 +237,14 @@ export default function App() {
   const stats: TrackingStats = {
     totalDistanceMeters: segments.reduce((acc, s) => acc + (s.distanceMeters || 0), 0),
     totalDurationSeconds: segments.reduce((acc, s) => acc + (s.durationSeconds || 0), 0),
-    trekkingDistanceMeters: segments
-      .filter((s) => s.mode === 'trekking')
+    walkingDistanceMeters: segments
+      .filter((s) => s.mode === 'walking')
       .reduce((acc, s) => acc + (s.distanceMeters || 0), 0),
     vehicleDistanceMeters: segments
       .filter((s) => s.mode === 'vehicle')
+      .reduce((acc, s) => acc + (s.distanceMeters || 0), 0),
+    airplaneDistanceMeters: segments
+      .filter((s) => s.mode === 'airplane')
       .reduce((acc, s) => acc + (s.distanceMeters || 0), 0),
     maxSpeedKmH: segments.reduce(
       (max, s) => Math.max(max, s.averageSpeedKmH || 0),
@@ -210,6 +287,9 @@ export default function App() {
    */
   const handleNewLocation = useCallback(
     (coords: GeolocationCoordinates, timestamp: number) => {
+      // Do NOT record, process, or send location data unless user is logged in
+      if (!authToken || !authUser) return;
+
       const now = timestamp || Date.now();
       const currentJourneyId = activeJourneyIdRef.current;
 
@@ -235,7 +315,19 @@ export default function App() {
         }),
       };
 
-      // Check for significant visual movement (>= 3.0 meters) to avoid visual jitter/blinking
+      // Stream coordinate update to ASP.NET Core backend endpoint POST /LocationTracker/Coordinate/CreateCoordinate
+      locationTrackerService.createCoordinate({
+        userId: authUser.id,
+        journeyId: currentJourneyId || 1,
+        routeId: selectedRouteId || undefined,
+        sequenceIndex: newPoint.sequenceIndex || 0,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        altitude: coords.altitude || undefined,
+        accuracyMeters: coords.accuracy || undefined,
+        headingDegrees: coords.heading || undefined,
+        speedKmH: newPoint.speed || 0,
+      });
       const lastVisual = lastVisualPointRef.current;
       let isSignificantMovement = false;
       if (!lastVisual) {
@@ -429,7 +521,8 @@ export default function App() {
 
   // Periodic timer to increment dwell time if stationary
   useEffect(() => {
-    if (!isTracking) return;
+    const isLoggedIn = !!authToken && !!authUser;
+    if (!isTracking || !isLoggedIn) return;
 
     dwellTimerRef.current = setInterval(() => {
       const prev = stationaryRef.current;
@@ -470,9 +563,10 @@ export default function App() {
     };
   }, [isTracking, recordStationaryPlace]);
 
-  // Geolocation watchPosition setup - starts GPS automatically!
+  // Geolocation watchPosition setup - starts GPS automatically ONLY when user is logged in!
   useEffect(() => {
-    if (!isTracking) {
+    const isLoggedIn = !!authToken && !!authUser;
+    if (!isTracking || !isLoggedIn) {
       if (watchIdRef.current != null) {
         navigator.geolocation.clearWatch(watchIdRef.current);
         watchIdRef.current = null;
@@ -552,22 +646,125 @@ export default function App() {
   }, [isTracking, handleNewLocation]);
 
   /**
-   * Add a custom marker
+   * Synchronize Custom Markers and Route Logs from ASP.NET Core backend
    */
-  const handleAddCustomMarker = (markerData: {
+  useEffect(() => {
+    if (!authToken || !authUser) return;
+
+    // Fetch initial backend custom markers
+    locationTrackerService.getAllCustomMarkers().then((backendMarkers) => {
+      if (backendMarkers && Array.isArray(backendMarkers) && backendMarkers.length > 0) {
+        const mapped: CustomMarker[] = backendMarkers.map((m) => ({
+          id: m.id,
+          userId: m.userId,
+          userName: m.userId === authUser.id ? userName : `User #${m.userId}`,
+          userColor: m.userColor || PALETTE_30_COLORS[m.userId % PALETTE_30_COLORS.length],
+          lat: m.latitude,
+          lng: m.longitude,
+          name: m.name,
+          description: `Category: ${m.category || 'generic'}`,
+          category: (m.category as any) || 'generic',
+          createdAt: new Date(m.createdAt).getTime() || Date.now(),
+          isFromStayPoint: m.isFromStayPoint,
+        }));
+        setCustomMarkers(mapped);
+      } else {
+        // If backend returned empty or unavailable, check local storage or fallback option
+        setCustomMarkers((prev) => {
+          if (prev.length > 0) return prev;
+          return INITIAL_DEMO_MARKERS;
+        });
+      }
+    }).catch(() => {
+      setCustomMarkers((prev) => {
+        if (prev.length > 0) return prev;
+        return INITIAL_DEMO_MARKERS;
+      });
+    });
+
+    // Fetch initial backend route logs
+    locationTrackerService.getAllRouteLogs().then((backendLogs) => {
+      if (backendLogs && Array.isArray(backendLogs) && backendLogs.length > 0) {
+        const mappedLogs: CompletedRouteLog[] = backendLogs.map((l) => ({
+          id: l.id,
+          userId: l.userId,
+          userName: l.userId === authUser.id ? userName : `User #${l.userId}`,
+          userColor: PALETTE_30_COLORS[l.userId % PALETTE_30_COLORS.length],
+          userAvatar: l.userId === authUser.id && userAvatarUrl
+            ? userAvatarUrl
+            : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80',
+          destinationName: l.destinationName || 'Destination',
+          destinationCoords: { lat: 7.1475, lng: 3.3619 },
+          startTime: new Date(l.completedAt).getTime() - (l.durationSeconds || 60) * 1000,
+          endTime: new Date(l.completedAt).getTime(),
+          durationSeconds: l.durationSeconds || 60,
+          durationFormatted: formatDuration(l.durationSeconds || 60),
+          distanceMeters: l.totalDistanceMeters || 1000,
+          averageSpeedKmH: l.totalDistanceMeters > 0 && l.durationSeconds > 0
+            ? Number((l.totalDistanceMeters / 1000 / (l.durationSeconds / 3600)).toFixed(1))
+            : 20,
+          travelMode: l.travelMode === 2 ? 'WALKING' : l.travelMode === 3 ? 'FLIGHT' : 'DRIVING',
+          status: 'completed',
+          completedAtTimeString: new Date(l.completedAt).toLocaleString('en-US', {
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+        }));
+        setCompletedRoutes(mappedLogs);
+      } else {
+        setCompletedRoutes((prev) => {
+          if (prev.length > 0) return prev;
+          return INITIAL_COMPLETED_ROUTES;
+        });
+      }
+    }).catch(() => {
+      setCompletedRoutes((prev) => {
+        if (prev.length > 0) return prev;
+        return INITIAL_COMPLETED_ROUTES;
+      });
+    });
+
+    // Synchronize recorded places fallback if empty
+    setRecordedPlaces((prev) => {
+      if (prev.length > 0) return prev;
+      return INITIAL_RECORDED_PLACES;
+    });
+  }, [authToken, authUser, userName, userAvatarUrl]);
+
+  /**
+   * Add a custom marker and sync with ASP.NET Core backend
+   */
+  const handleAddCustomMarker = async (markerData: {
     lat: number;
     lng: number;
     name: string;
     description: string;
     category: 'generic' | 'work' | 'cafe' | 'home' | 'landmark' | 'store';
   }) => {
+    const activeUserId = authUser?.id || 1;
+    const activeUserColor = PALETTE_30_COLORS[0];
+
+    // POST /LocationTracker/CustomMarker/CreateCustomMarker
+    const res = await locationTrackerService.createCustomMarker({
+      userId: activeUserId,
+      userColor: activeUserColor,
+      name: markerData.name,
+      category: markerData.category,
+      latitude: markerData.lat,
+      longitude: markerData.lng,
+      isFromStayPoint: false,
+    });
+
     const newMarker: CustomMarker = {
       ...markerData,
-      id: Date.now() + Math.floor(Math.random() * 1000),
+      id: res?.id || Date.now() + Math.floor(Math.random() * 1000),
       createdAt: Date.now(),
-      userId: 1,
+      userId: activeUserId,
       userName: userName,
-      userColor: PALETTE_30_COLORS[0],
+      userColor: activeUserColor,
     };
     setCustomMarkers((prev) => [newMarker, ...prev]);
   };
@@ -584,18 +781,31 @@ export default function App() {
   /**
    * Convert a 90s stay point (recorded place) into a custom marker
    */
-  const handleEditStayPointAsMarker = (place: RecordedPlace) => {
+  const handleEditStayPointAsMarker = async (place: RecordedPlace) => {
+    const activeUserId = authUser?.id || 1;
+    const activeUserColor = PALETTE_30_COLORS[0];
+
+    const res = await locationTrackerService.createCustomMarker({
+      userId: activeUserId,
+      userColor: activeUserColor,
+      name: place.name || 'Stationary Spot',
+      category: 'landmark',
+      latitude: place.lat,
+      longitude: place.lng,
+      isFromStayPoint: true,
+    });
+
     const newMarker: CustomMarker = {
-      id: Date.now() + Math.floor(Math.random() * 1000),
+      id: res?.id || Date.now() + Math.floor(Math.random() * 1000),
       lat: place.lat,
       lng: place.lng,
       name: place.name || 'Stationary Spot',
       description: place.notes || `Stayed here for ${formatDuration(place.dwellDurationSeconds)}`,
       category: 'landmark',
       createdAt: Date.now(),
-      userId: 1,
+      userId: activeUserId,
       userName: userName,
-      userColor: PALETTE_30_COLORS[0],
+      userColor: activeUserColor,
       isFromStayPoint: true,
     };
     setCustomMarkers((prev) => {
@@ -605,9 +815,10 @@ export default function App() {
   };
 
   /**
-   * Delete a custom marker
+   * Delete a custom marker and delete on backend
    */
-  const handleDeleteCustomMarker = (id: number) => {
+  const handleDeleteCustomMarker = async (id: number) => {
+    await locationTrackerService.deleteCustomMarker(id);
     setCustomMarkers((prev) => prev.filter((m) => m.id !== id));
   };
 
@@ -623,6 +834,7 @@ export default function App() {
     setActiveDestinationName(destName || 'Selected Destination');
     setActiveDestinationCoords(destination);
     setIsNavigating(false);
+    setNavigationActive(false);
     const origin = currentPoint
       ? { lat: currentPoint.lat, lng: currentPoint.lng }
       : { lat: 7.1475, lng: 3.3619 };
@@ -636,17 +848,37 @@ export default function App() {
     }
   };
 
+  // Initialize SignalR connection on app load for real-time hub updates
+  useEffect(() => {
+    initSignalRConnection();
+  }, []);
+
   /**
    * Initiate turn-by-turn navigation along the selected route
    */
   const handleStartNavigation = () => {
     setIsNavigating(true);
+    setNavigationActive(true);
     setNavigationStartTime(Date.now());
+    if (activeDestinationName && activeDestinationCoords) {
+      sendStartRouteSignal(1, activeDestinationName, activeDestinationCoords);
+    }
   };
+
+  // Helper to dismiss notification with slide-out animation
+  const dismissNotification = useCallback((id: number) => {
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, isExiting: true } : n))
+    );
+    setTimeout(() => {
+      setNotifications((prev) => prev.filter((n) => n.id !== id));
+    }, 380);
+  }, []);
 
   // Helper to trigger toast notification
   const addNotification = useCallback((uName: string, uColor: string, title: string, message: string) => {
     const notifId = Date.now() + Math.floor(Math.random() * 1000);
+    const isCancelled = title.toLowerCase().includes('cancel');
     const newNotif: ToastNotification = {
       id: notifId,
       userName: uName,
@@ -654,14 +886,16 @@ export default function App() {
       title,
       message,
       timestamp: Date.now(),
+      isCancelledType: isCancelled,
+      isExiting: false,
     };
     setNotifications((prev) => [newNotif, ...prev.slice(0, 4)]);
 
-    // Auto-dismiss notification after 7 seconds
+    // Auto-dismiss notification after 6 seconds
     setTimeout(() => {
-      setNotifications((prev) => prev.filter((n) => n.id !== notifId));
-    }, 7000);
-  }, []);
+      dismissNotification(notifId);
+    }, 6000);
+  }, [dismissNotification]);
 
   /**
    * Complete route and record history log
@@ -702,6 +936,7 @@ export default function App() {
 
     setCompletedRoutes((prev) => [newCompletedLog, ...prev]);
     setIsNavigating(false);
+    setNavigationActive(false);
     setNavigationStartTime(null);
     setRoutes([]);
     setSelectedRouteId(null);
@@ -713,11 +948,11 @@ export default function App() {
   }, [routes, selectedRouteId, navigationStartTime, activeDestinationName, activeDestinationCoords, currentPoint, addNotification]);
 
   /**
-   * Clear active route and cancel navigation (saves cancelled route if user was on a route)
+   * Clear active route and cancel navigation (saves cancelled route ONLY if start navigation was clicked)
    */
   const handleClearRoute = () => {
-    // If a route was actively navigated or selected, save it as a cancelled route log
-    if (activeDestinationName || routes.length > 0 || isNavigating) {
+    // Save as cancelled route log ONLY if start navigation was clicked and active!
+    if (isNavigating) {
       const activeRoute = routes.find((r) => r.id === selectedRouteId) || routes[0];
       const durationSeconds = navigationStartTime
         ? Math.max(1, Math.round((Date.now() - navigationStartTime) / 1000))
@@ -725,6 +960,9 @@ export default function App() {
       const distanceMeters = activeRoute ? activeRoute.distanceMeters : 1000;
       const speedKmH = Number((distanceMeters / 1000 / (durationSeconds / 3600)).toFixed(1)) || 20;
       const destName = activeDestinationName || 'Selected Destination';
+
+      // Send SignalR cancel route event
+      sendCancelRouteSignal(1, destName, durationSeconds);
 
       const cancelledLog: CompletedRouteLog = {
         id: Date.now() + Math.floor(Math.random() * 1000),
@@ -756,6 +994,7 @@ export default function App() {
     }
 
     setIsNavigating(false);
+    setNavigationActive(false);
     setNavigationStartTime(null);
     setRoutes([]);
     setSelectedRouteId(null);
@@ -969,16 +1208,16 @@ export default function App() {
         isDark ? 'bg-zinc-950 text-zinc-100' : 'bg-zinc-50 text-zinc-900'
       }`}
     >
-      {/* Top Header Controls (Adhering strictly to soft light/dark theme, no blue) */}
+      {/* Top Header Controls */}
       <HeaderBar
-        isTracking={isTracking}
         theme={theme}
         userName={userName}
-        onToggleTracking={() => setIsTracking((prev) => !prev)}
+        userAvatarUrl={userAvatarUrl || undefined}
+        isLoggedIn={!!authToken && !!authUser}
         onResetTrail={handleResetTrail}
-        onFastForwardDwell={handleFastForwardDwell}
-        onOpenDataCollected={() => setIsDataModalOpen(true)}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+        onOpenLoginOverlay={() => setIsLoginOverlayOpen(true)}
+        onLogoutClick={() => setIsLogoutModalOpen(true)}
       />
 
       {/* Geolocation notice banner if waiting for fix */}
@@ -1037,41 +1276,88 @@ export default function App() {
         </button>
       </div>
 
-      {/* Floating Arrival Notification Toasts */}
-      {notifications.length > 0 && (
+      {/* Top Floating Notifications (Completion / Arrival) */}
+      {notifications.filter((n) => !n.isCancelledType).length > 0 && (
         <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 max-w-md w-full px-4 pointer-events-none">
-          {notifications.map((notif) => (
-            <div
-              key={notif.id}
-              className={`p-3 rounded-2xl shadow-xl border backdrop-blur-md flex items-start gap-3 pointer-events-auto transition-all animate-in fade-in slide-in-from-top-2 ${
-                isDark
-                  ? 'bg-zinc-900/95 border-emerald-500/40 text-zinc-100 shadow-emerald-950/40'
-                  : 'bg-white/95 border-emerald-500/30 text-zinc-900 shadow-emerald-500/10'
-              }`}
-            >
+          {notifications
+            .filter((n) => !n.isCancelledType)
+            .map((notif) => (
               <div
-                className="w-8 h-8 rounded-xl flex items-center justify-center text-white font-bold text-xs shrink-0 shadow-sm"
-                style={{ backgroundColor: notif.userColor }}
+                key={notif.id}
+                className={`p-3 rounded-2xl shadow-xl border backdrop-blur-md flex items-start gap-3 pointer-events-auto transition-all animate-in fade-in slide-in-from-top-2 ${
+                  isDark
+                    ? 'bg-zinc-900/95 border-emerald-500/40 text-zinc-100 shadow-emerald-950/40'
+                    : 'bg-white/95 border-emerald-500/30 text-zinc-900 shadow-emerald-500/10'
+                }`}
               >
-                <Bell className="w-4 h-4 text-white" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-emerald-500">{notif.title}</span>
-                  <span className="text-[10px] text-zinc-400">Just now</span>
+                <div
+                  className="w-8 h-8 rounded-xl flex items-center justify-center text-white font-bold text-xs shrink-0 shadow-sm"
+                  style={{ backgroundColor: notif.userColor }}
+                >
+                  <Bell className="w-4 h-4 text-white" />
                 </div>
-                <p className="text-xs font-semibold mt-0.5 text-zinc-800 dark:text-zinc-200 leading-snug">
-                  {notif.message}
-                </p>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-500">{notif.title}</span>
+                    <span className="text-[10px] text-zinc-400">Just now</span>
+                  </div>
+                  <p className="text-xs font-semibold mt-0.5 text-zinc-800 dark:text-zinc-200 leading-snug">
+                    {notif.message}
+                  </p>
+                </div>
+                <button
+                  onClick={() => dismissNotification(notif.id)}
+                  className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-1 cursor-pointer"
+                >
+                  &times;
+                </button>
               </div>
-              <button
-                onClick={() => setNotifications((prev) => prev.filter((n) => n.id !== notif.id))}
-                className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-1 cursor-pointer"
+            ))}
+        </div>
+      )}
+
+      {/* Bottom Right Floating Route Cancelled Notification Toasts (With Slide-In & Slide-Out) */}
+      {notifications.filter((n) => n.isCancelledType).length > 0 && (
+        <div
+          id="route-cancelled-toast-container"
+          className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2.5 max-w-sm w-[calc(100%-3rem)] pointer-events-none select-none"
+        >
+          {notifications
+            .filter((n) => n.isCancelledType)
+            .map((notif) => (
+              <div
+                key={notif.id}
+                className={`p-4 rounded-2xl shadow-2xl border backdrop-blur-md flex items-start gap-3.5 pointer-events-auto w-full transition-all ${
+                  notif.isExiting ? 'toast-slide-out' : 'toast-slide-in'
+                } ${
+                  isDark
+                    ? 'bg-zinc-900/95 border-rose-500/50 text-zinc-100 shadow-rose-950/50'
+                    : 'bg-white/95 border-rose-500/40 text-zinc-900 shadow-rose-500/20'
+                }`}
               >
-                &times;
-              </button>
-            </div>
-          ))}
+                <div className="w-9 h-9 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-500 font-bold shrink-0 shadow-sm">
+                  <AlertCircle className="w-5 h-5 text-rose-500 animate-pulse" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-extrabold uppercase tracking-wider text-rose-500">
+                      {notif.title}
+                    </span>
+                    <span className="text-[10px] font-semibold text-zinc-400">Just now</span>
+                  </div>
+                  <p className="text-xs font-semibold mt-1 text-zinc-800 dark:text-zinc-200 leading-snug">
+                    {notif.message}
+                  </p>
+                </div>
+                <button
+                  onClick={() => dismissNotification(notif.id)}
+                  className="p-1 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer shrink-0"
+                  title="Dismiss"
+                >
+                  &times;
+                </button>
+              </div>
+            ))}
         </div>
       )}
 
@@ -1174,17 +1460,29 @@ export default function App() {
               onDeleteCustomMarker={handleDeleteCustomMarker}
               onRequestRoute={handleRequestRoute}
               onSelectRoute={(id) => setSelectedRouteId(id)}
-              onOpenDataSchema={() => setIsDataModalOpen(true)}
             />
           </section>
         )}
       </main>
 
-      {/* Data Collected Specification Modal */}
-      <DataCollectedModal
-        isOpen={isDataModalOpen}
+      {/* Grainy Transparent Theme-Aware Login Overlay */}
+      <LoginOverlay
+        isOpen={isLoginOverlayOpen}
         theme={theme}
-        onClose={() => setIsDataModalOpen(false)}
+        currentUser={authUser}
+        onLoginSuccess={handleLoginSuccess}
+        onClose={
+          authToken && authUser ? () => setIsLoginOverlayOpen(false) : undefined
+        }
+      />
+
+      {/* Logout Confirmation Dialog */}
+      <LogoutConfirmModal
+        isOpen={isLogoutModalOpen}
+        theme={theme}
+        userName={userName}
+        onConfirmLogout={handleLogoutConfirm}
+        onCancel={() => setIsLogoutModalOpen(false)}
       />
     </div>
   );

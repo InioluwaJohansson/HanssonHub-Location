@@ -187,8 +187,8 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
     segments.forEach((seg) => {
       const isSelected = seg.id === selectedSegmentId;
 
-      if (seg.mode === 'trekking') {
-        // Green dotted lines for Trekking
+      if (seg.mode === 'walking') {
+        // Green dotted lines for Walking
         const polyline = new google.maps.Polyline({
           path: seg.path,
           strokeOpacity: 0,
@@ -208,6 +208,29 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
           ],
           map: map,
           zIndex: isSelected ? 30 : 10,
+        });
+        polylinesRef.current.push(polyline);
+      } else if (seg.mode === 'airplane') {
+        // Purple dotted lines for Airplane flight corridor
+        const polyline = new google.maps.Polyline({
+          path: seg.path,
+          strokeOpacity: 0,
+          icons: [
+            {
+              icon: {
+                path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+                fillOpacity: 1,
+                scale: isSelected ? 4.8 : 3.6,
+                fillColor: isSelected ? '#7C3AED' : '#8B5CF6',
+                strokeColor: '#5B21B6',
+                strokeWeight: 1,
+              },
+              offset: '0',
+              repeat: '18px',
+            },
+          ],
+          map: map,
+          zIndex: isSelected ? 40 : 20,
         });
         polylinesRef.current.push(polyline);
       } else {
@@ -321,12 +344,16 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
             <span>${route.durationFormatted}</span>
           </div>
           <div style="display: flex; align-items: center; gap: 5px; font-size: 10px; font-family: ui-monospace, monospace; margin-top: 1px;">
-            <span style="color: #059669; display: inline-flex; align-items: center; gap: 2px;">
-              <span>👣</span><span>${route.trekkingDurationFormatted}</span>
+            <span style="color: #059669; display: inline-flex; align-items: center; gap: 2px;" title="Walking Duration">
+              <span>👣</span><span>${route.walkingDurationFormatted || route.trekkingDurationFormatted || 'N/A'}</span>
             </span>
             <span style="opacity: 0.25;">|</span>
-            <span style="color: #2563eb; display: inline-flex; align-items: center; gap: 2px;">
+            <span style="color: #2563eb; display: inline-flex; align-items: center; gap: 2px;" title="Vehicle Duration">
               <span>🚗</span><span>${route.vehicleDurationFormatted}</span>
+            </span>
+            <span style="opacity: 0.25;">|</span>
+            <span style="color: #8b5cf6; display: inline-flex; align-items: center; gap: 2px;" title="Airplane Duration">
+              <span>✈️</span><span>${route.airplaneDurationFormatted || 'N/A'}</span>
             </span>
           </div>
           <div style="
@@ -629,7 +656,7 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
                 </div>
                 <div style="color: ${textColor}; padding-top: 2px;">
                   <strong style="color: ${subTextColor}; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; display: block;">Current Speed</strong>
-                  <span style="font-weight: 700; color: ${user.color || '#3b82f6'};">${(user.speedKmH || 0).toFixed(1)} km/h</span> (${user.mode})
+                  <span style="font-weight: 700; color: ${user.color || '#3b82f6'};">${(user.speedKmH || 0).toFixed(1)} km/h</span> (${user.mode === 'walking' ? 'Walking 🚶' : user.mode === 'airplane' ? 'Airplane ✈️' : 'Vehicle 🚗'})
                 </div>
               </div>
             </div>

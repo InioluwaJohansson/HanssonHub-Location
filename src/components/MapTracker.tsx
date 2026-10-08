@@ -11,11 +11,13 @@ import {
   AppUser,
 } from '../types';
 import { MapOverlays } from './MapOverlays';
+import { StationaryNewsCard } from './StationaryNewsCard';
 import {
   LocateFixed,
   Layers,
   Footprints,
   Car,
+  Plane,
   MapPin,
   Route,
   X,
@@ -42,6 +44,8 @@ import {
   Loader2,
   Volume2,
   VolumeX,
+  Building2,
+  Sparkles,
 } from 'lucide-react';
 import { formatDistance, formatDuration, calculateDistanceMeters } from '../utils/geo';
 import {
@@ -100,17 +104,54 @@ const MapCameraController: React.FC<{
   targetPoint: { lat: number; lng: number } | null;
   triggerCenter: number;
   routes: RouteOption[];
-}> = ({ targetPoint, triggerCenter, routes }) => {
+  allUsers?: AppUser[];
+  selectedUserIdFilter?: number | 'all';
+}> = ({ targetPoint, triggerCenter, routes, allUsers = [], selectedUserIdFilter = 'all' }) => {
   const map = useMap();
   const prevTriggerCenter = React.useRef(triggerCenter);
   const prevRoutesLen = React.useRef(0);
+  const initialFitDoneRef = React.useRef(false);
+  const prevFilterRef = React.useRef(selectedUserIdFilter);
+
+  // Automatically fit camera bounds to include ALL users and their locations on initial app load or when 'all' users is selected
+  React.useEffect(() => {
+    if (!map || typeof google === 'undefined' || !google.maps || !allUsers || allUsers.length === 0) return;
+
+    if (routes.length > 0) return; // Respect active route bounds when navigating or viewing routes
+
+    const isFilterChangedToAll = selectedUserIdFilter === 'all' && prevFilterRef.current !== 'all';
+
+    if (!initialFitDoneRef.current || isFilterChangedToAll) {
+      const bounds = new google.maps.LatLngBounds();
+      let validCount = 0;
+      allUsers.forEach((u) => {
+        if (u.currentPoint && typeof u.currentPoint.lat === 'number' && !isNaN(u.currentPoint.lat)) {
+          bounds.extend({ lat: u.currentPoint.lat, lng: u.currentPoint.lng });
+          validCount++;
+        }
+      });
+
+      if (validCount > 0) {
+        map.fitBounds(bounds, { top: 90, right: 70, bottom: 90, left: 70 });
+        initialFitDoneRef.current = true;
+      }
+    } else if (selectedUserIdFilter !== 'all' && prevFilterRef.current !== selectedUserIdFilter) {
+      const selectedUser = allUsers.find((u) => u.id === selectedUserIdFilter);
+      if (selectedUser?.currentPoint) {
+        map.panTo({ lat: selectedUser.currentPoint.lat, lng: selectedUser.currentPoint.lng });
+        map.setZoom(15);
+      }
+    }
+
+    prevFilterRef.current = selectedUserIdFilter;
+  }, [map, allUsers, selectedUserIdFilter, routes.length]);
 
   // Re-center map ONLY when triggerCenter explicitly increments
   React.useEffect(() => {
     if (map && targetPoint && triggerCenter > prevTriggerCenter.current) {
       map.panTo(targetPoint);
-      if (map.getZoom() && (map.getZoom() as number) < 15) {
-        map.setZoom(16);
+      if (map.getZoom() && (map.getZoom() as number) < 14) {
+        map.setZoom(15);
       }
     }
     prevTriggerCenter.current = triggerCenter;
@@ -143,6 +184,9 @@ interface SearchLocationItem {
   lng: number;
   type: string;
   subtitle?: string;
+  minDistKm?: number;
+  scopeTier?: 1 | 2 | 3; // 1: Around Users, 2: State Level, 3: Country / Global
+  scopeLabel?: string;
 }
 
 const PRESET_LOCATIONS: SearchLocationItem[] = [
@@ -242,7 +286,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Search known locations all around the world via Photon Geocoding API
+  // Search known locations all around the world via Photon Geocoding API (biased around user cluster center)
   useEffect(() => {
     if (!searchLocationQuery || searchLocationQuery.trim().length < 2) {
       setWorldwideResults([]);
@@ -253,10 +297,21 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
     const query = searchLocationQuery.trim();
     setIsSearchingWorldwide(true);
 
+    // Compute user cluster center coordinate to bias photon geocoder towards user area
+    const userPts = allUsers
+      .map((u) => u.currentPoint)
+      .filter((p): p is LocationPoint => !!p && typeof p.lat === 'number' && !isNaN(p.lat));
+    const centerLat = userPts.length
+      ? userPts.reduce((acc, p) => acc + p.lat, 0) / userPts.length
+      : 7.1475;
+    const centerLng = userPts.length
+      ? userPts.reduce((acc, p) => acc + p.lng, 0) / userPts.length
+      : 3.3619;
+
     const timer = setTimeout(async () => {
       try {
         const res = await fetch(
-          `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=10`
+          `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&lat=${centerLat}&lon=${centerLng}&limit=15`
         );
         if (res.ok) {
           const data = await res.json();
@@ -297,7 +352,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
     }, 280);
 
     return () => clearTimeout(timer);
-  }, [searchLocationQuery]);
+  }, [searchLocationQuery, allUsers]);
 
   // Search catalog combining preset landmarks, custom markers, and recorded places
   const searchableLocations = useMemo(() => {
@@ -325,7 +380,10 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
     return list;
   }, [customMarkers, recordedPlaces]);
 
-  // Merge local matches with worldwide geocoded results
+  // Merge local matches with geocoded results, categorized by scope tier:
+  // Scope 1: Area around all users (Immediate local area / < 20km)
+  // Scope 2: State level (Ogun State / Regional / < 120km)
+  // Scope 3: Country & Global level (Nigeria nationwide & worldwide)
   const filteredLocations = useMemo(() => {
     if (!searchLocationQuery.trim()) return [];
     const q = searchLocationQuery.toLowerCase().trim();
@@ -349,8 +407,59 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
       }
     });
 
-    return merged.slice(0, 10);
-  }, [searchLocationQuery, searchableLocations, worldwideResults]);
+    // Compute scope tier for each location relative to all active user positions
+    const userPts = allUsers
+      .map((u) => u.currentPoint)
+      .filter((p): p is LocationPoint => !!p && typeof p.lat === 'number' && !isNaN(p.lat));
+
+    const scored = merged.map((loc) => {
+      let minDistKm = 99999;
+      if (userPts.length > 0) {
+        userPts.forEach((p) => {
+          const distM = calculateDistanceMeters(loc.lat, loc.lng, p.lat, p.lng);
+          const distKm = distM / 1000;
+          if (distKm < minDistKm) minDistKm = distKm;
+        });
+      } else {
+        minDistKm = calculateDistanceMeters(loc.lat, loc.lng, 7.1475, 3.3619) / 1000;
+      }
+
+      const isLocalPreset = PRESET_LOCATIONS.some((p) => p.name === loc.name);
+      const isOgunState =
+        loc.subtitle?.toLowerCase().includes('ogun') ||
+        loc.name.toLowerCase().includes('ogun') ||
+        loc.subtitle?.toLowerCase().includes('abeokuta') ||
+        (minDistKm > 20 && minDistKm <= 120);
+
+      let scopeTier: 1 | 2 | 3 = 3;
+      let scopeLabel = '🇳🇬 Nigeria & Country Level';
+
+      if (minDistKm <= 20 || isLocalPreset || loc.type === 'Saved Marker' || loc.type === 'Visited Place') {
+        scopeTier = 1;
+        scopeLabel = '📍 Around All Users (Local Area)';
+      } else if (isOgunState) {
+        scopeTier = 2;
+        scopeLabel = '🏛️ State Level (Ogun State)';
+      }
+
+      return {
+        ...loc,
+        minDistKm: Number(minDistKm.toFixed(1)),
+        scopeTier,
+        scopeLabel,
+      };
+    });
+
+    // Hierarchical sorting: Scope 1 (Area around all users) FIRST, Scope 2 (State) SECOND, Scope 3 (Country) THIRD
+    scored.sort((a, b) => {
+      if (a.scopeTier !== b.scopeTier) {
+        return a.scopeTier - b.scopeTier;
+      }
+      return (a.minDistKm || 0) - (b.minDistKm || 0);
+    });
+
+    return scored.slice(0, 15);
+  }, [searchLocationQuery, searchableLocations, worldwideResults, allUsers]);
 
   // Draggable Direction Overlay HUD state
   const [hudPos, setHudPos] = useState({ x: 20, y: 75 });
@@ -443,6 +552,18 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
   // Currently active route (either selected or fastest default)
   const activeRoute = routes.find((r) => r.id === selectedRouteId) || routes[0];
 
+  // Stationary Spot Insights state
+  const currentSpeed = currentPoint ? currentPoint.speed : 0;
+  const isStationaryNow = currentSpeed <= 1.5;
+  const [isStationaryPanelOpen, setIsStationaryPanelOpen] = useState<boolean>(false);
+
+  // Auto-open panel when stationary state becomes active
+  useEffect(() => {
+    if (isStationaryNow) {
+      setIsStationaryPanelOpen(true);
+    }
+  }, [isStationaryNow]);
+
   // Voice Navigation State & Spoken Thresholds Ref
   const [isVoiceMutedState, setIsVoiceMutedState] = useState<boolean>(isVoiceMuted());
   const spokenThresholdsRef = useRef<Set<number>>(new Set());
@@ -453,7 +574,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
     const nextMuted = !isVoiceMutedState;
     setIsVoiceMutedState(nextMuted);
     setVoiceMuted(nextMuted);
-    if (!nextMuted) {
+    if (!nextMuted && isNavigating) {
       speakVoice('Voice navigation enabled.', true);
     }
   }, [isVoiceMutedState]);
@@ -595,7 +716,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
         <Map
           id="tracking-google-map"
           defaultCenter={defaultCenter}
-          defaultZoom={16}
+          defaultZoom={13}
           mapTypeId={mapType}
           gestureHandling="greedy"
           disableDefaultUI={true}
@@ -628,6 +749,8 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
             targetPoint={mapCameraTarget || (currentPoint ? { lat: currentPoint.lat, lng: currentPoint.lng } : null)}
             triggerCenter={recenterCount}
             routes={routes}
+            allUsers={allUsers}
+            selectedUserIdFilter={selectedUserIdFilter}
           />
         </Map>
       </APIProvider>
@@ -662,7 +785,17 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
                   setIsAutocompleteOpen(true);
                 }
               }}
-              placeholder="Search locations worldwide, markers..."
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && filteredLocations.length > 0) {
+                  const firstLoc = filteredLocations[0];
+                  setSearchLocationQuery(firstLoc.name);
+                  setSelectedSearchLocation(firstLoc);
+                  setIsAutocompleteOpen(false);
+                  setMapCameraTarget({ lat: firstLoc.lat, lng: firstLoc.lng });
+                  setRecenterCount((c) => c + 1);
+                }
+              }}
+              placeholder="Search locations (Area around users ➔ State ➔ Country)..."
               className={`w-full pl-9 pr-8 py-1.5 text-xs rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-xs transition ${
                 isDark
                   ? 'bg-zinc-900/90 border-zinc-700 text-zinc-100 placeholder:text-zinc-500'
@@ -708,47 +841,90 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
             </button>
           )}
 
-          {/* Autocomplete Dropdown */}
+          {/* Autocomplete Dropdown Categorized by Search Scope Hierarchy */}
           {isAutocompleteOpen && filteredLocations.length > 0 && (
             <div
               id="location-search-autocomplete"
-              className={`absolute top-full left-0 right-0 mt-1.5 rounded-xl border shadow-xl backdrop-blur-md overflow-hidden z-40 max-h-64 overflow-y-auto no-scrollbar py-1 ${
+              className={`absolute top-full left-0 right-0 mt-1.5 rounded-xl border shadow-xl backdrop-blur-md overflow-hidden z-40 max-h-72 overflow-y-auto no-scrollbar py-1 ${
                 isDark ? 'bg-zinc-900/98 border-zinc-700 text-zinc-100' : 'bg-white/98 border-zinc-200 text-zinc-900'
               }`}
             >
-              <div className="px-3 py-1 text-[10px] font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
-                <span>Select Location to Plot Route</span>
-                <span className="text-[9px] text-blue-500 font-mono">Worldwide Search</span>
-              </div>
-              {filteredLocations.map((loc) => (
-                <button
-                  key={loc.id}
-                  type="button"
-                  onClick={() => {
-                    setSearchLocationQuery(loc.name);
-                    setSelectedSearchLocation(loc);
-                    setIsAutocompleteOpen(false);
-                    setMapCameraTarget({ lat: loc.lat, lng: loc.lng });
-                    setRecenterCount((c) => c + 1);
-                  }}
-                  className={`w-full px-3 py-2 text-left flex items-start gap-2.5 hover:bg-blue-500/10 transition cursor-pointer border-b border-zinc-100 dark:border-zinc-800/50 last:border-0 ${
-                    selectedSearchLocation?.id === loc.id ? 'bg-blue-500/15' : ''
-                  }`}
-                >
-                  <MapPin className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-bold truncate text-zinc-900 dark:text-zinc-100">{loc.name}</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 text-zinc-500 shrink-0 font-medium">
-                        {loc.type}
-                      </span>
+              {(() => {
+                const tier1 = filteredLocations.filter((item) => item.scopeTier === 1);
+                const tier2 = filteredLocations.filter((item) => item.scopeTier === 2);
+                const tier3 = filteredLocations.filter((item) => item.scopeTier === 3);
+
+                const renderLocationItem = (loc: SearchLocationItem) => (
+                  <button
+                    key={loc.id}
+                    type="button"
+                    onClick={() => {
+                      setSearchLocationQuery(loc.name);
+                      setSelectedSearchLocation(loc);
+                      setIsAutocompleteOpen(false);
+                      setMapCameraTarget({ lat: loc.lat, lng: loc.lng });
+                      setRecenterCount((c) => c + 1);
+                    }}
+                    className={`w-full px-3 py-2 text-left flex items-start gap-2.5 hover:bg-blue-500/10 transition cursor-pointer border-b border-zinc-100 dark:border-zinc-800/50 last:border-0 ${
+                      selectedSearchLocation?.id === loc.id ? 'bg-blue-500/15' : ''
+                    }`}
+                  >
+                    <MapPin className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold truncate text-zinc-900 dark:text-zinc-100">{loc.name}</span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {loc.minDistKm !== undefined && loc.minDistKm < 1000 && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 font-mono font-bold">
+                              {loc.minDistKm} km
+                            </span>
+                          )}
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 text-zinc-500 font-medium">
+                            {loc.type}
+                          </span>
+                        </div>
+                      </div>
+                      {loc.subtitle && (
+                        <p className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">{loc.subtitle}</p>
+                      )}
                     </div>
-                    {loc.subtitle && (
-                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">{loc.subtitle}</p>
+                  </button>
+                );
+
+                return (
+                  <div>
+                    {tier1.length > 0 && (
+                      <div>
+                        <div className="px-3 py-1 bg-blue-500/10 text-blue-600 dark:text-blue-400 font-bold text-[10px] uppercase tracking-wider flex items-center justify-between border-y border-blue-500/20">
+                          <span className="flex items-center gap-1">📍 Around All Users (Local Area)</span>
+                          <span className="text-[9px] font-mono text-blue-500">1st Priority</span>
+                        </div>
+                        {tier1.map(renderLocationItem)}
+                      </div>
+                    )}
+
+                    {tier2.length > 0 && (
+                      <div>
+                        <div className="px-3 py-1 bg-amber-500/10 text-amber-600 dark:text-amber-400 font-bold text-[10px] uppercase tracking-wider flex items-center justify-between border-y border-amber-500/20">
+                          <span className="flex items-center gap-1">🏛️ State Level (Ogun State)</span>
+                          <span className="text-[9px] font-mono text-amber-500">2nd Priority</span>
+                        </div>
+                        {tier2.map(renderLocationItem)}
+                      </div>
+                    )}
+
+                    {tier3.length > 0 && (
+                      <div>
+                        <div className="px-3 py-1 bg-purple-500/10 text-purple-600 dark:text-purple-400 font-bold text-[10px] uppercase tracking-wider flex items-center justify-between border-y border-purple-500/20">
+                          <span className="flex items-center gap-1">🇳🇬 Nigeria & Country Level</span>
+                          <span className="text-[9px] font-mono text-purple-500">3rd Priority</span>
+                        </div>
+                        {tier3.map(renderLocationItem)}
+                      </div>
                     )}
                   </div>
-                </button>
-              ))}
+                );
+              })()}
             </div>
           )}
         </div>
@@ -1183,6 +1359,31 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
         </div>
       )}
 
+      {/* Stationary Spot Insights Floating Panel (Grounded Google Search Weather & Traffic) */}
+      {isStationaryPanelOpen && (
+        <div className="absolute top-16 right-4 z-20 max-w-sm w-[calc(100%-2rem)] sm:w-88 pointer-events-auto animate-in fade-in zoom-in-95 duration-200">
+          <div className="relative">
+            <button
+              onClick={() => setIsStationaryPanelOpen(false)}
+              className="absolute -top-2 -right-2 z-30 p-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-300 hover:text-white shadow-md cursor-pointer"
+              title="Close Insights Panel"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+            <StationaryNewsCard
+              lat={currentPoint ? currentPoint.lat : 7.1475}
+              lng={currentPoint ? currentPoint.lng : 3.3619}
+              speedKmH={currentSpeed}
+              isStationary={isStationaryNow}
+              locationName={
+                recordedPlaces.length > 0 ? recordedPlaces[0].name : 'Abeokuta'
+              }
+              isDark={isDark}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Non-Modal Add Marker Floating Panel */}
       {pendingMarkerPoint && !routes.length && (
         <div className="absolute top-16 right-4 z-20 max-w-sm w-[calc(100%-2rem)] sm:w-80 pointer-events-auto animate-in fade-in slide-in-from-top-2 duration-150">
@@ -1411,9 +1612,9 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
               : 'bg-white/95 border-zinc-200 text-zinc-700'
           }`}
         >
-          <div className="flex items-center gap-1.5" title="Trekking (walking/hiking)">
+          <div className="flex items-center gap-1.5" title="Walking">
             <Footprints className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-            <span className="hidden sm:inline">Trekking</span>
+            <span className="hidden sm:inline">Walking</span>
           </div>
 
           <span className="w-px h-3 bg-zinc-300 dark:bg-zinc-700" />
@@ -1421,6 +1622,13 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
           <div className="flex items-center gap-1.5" title="Vehicle (car/transit)">
             <Car className="w-3.5 h-3.5 text-blue-500 shrink-0" />
             <span className="hidden sm:inline">Vehicle</span>
+          </div>
+
+          <span className="w-px h-3 bg-zinc-300 dark:bg-zinc-700" />
+
+          <div className="flex items-center gap-1.5" title="Airplane Flight">
+            <Plane className="w-3.5 h-3.5 text-purple-500 shrink-0" />
+            <span className="hidden sm:inline">Airplane</span>
           </div>
 
           <span className="w-px h-3 bg-zinc-300 dark:bg-zinc-700" />
@@ -1461,6 +1669,26 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
           title={`Switch Map Type (Current: ${mapType})`}
         >
           <Layers className="w-4 h-4" />
+        </button>
+
+        {/* Stationary Spot Insights Toggle Button */}
+        <button
+          id="stationary-spot-insights-btn"
+          onClick={() => setIsStationaryPanelOpen((prev) => !prev)}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full shadow-md border backdrop-blur-md transition-all active:scale-95 text-xs font-bold cursor-pointer ${
+            isStationaryNow
+              ? 'bg-emerald-600 text-white border-emerald-400/60 shadow-emerald-950/40'
+              : isDark
+              ? 'bg-zinc-900/90 border-zinc-800 text-zinc-200 hover:bg-zinc-800'
+              : 'bg-white/95 border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+          }`}
+          title="Stationary Spot Insights: Today's Grounded Weather & Traffic News"
+        >
+          <Sparkles className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+          <span className="hidden sm:inline">Spot Insights</span>
+          {isStationaryNow && (
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping shrink-0" />
+          )}
         </button>
       </div>
     </div>

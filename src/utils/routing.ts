@@ -14,7 +14,7 @@ export async function fetchSuggestedRoutes(
   origin: { lat: number; lng: number },
   destination: { lat: number; lng: number },
   currentSpeedKmH: number = 0,
-  travelMode: 'WALKING' | 'DRIVING' = 'WALKING'
+  travelMode: 'WALKING' | 'DRIVING' | 'FLIGHT' = 'WALKING'
 ): Promise<RouteOption[]> {
   try {
     if (typeof window !== 'undefined' && (window as any).google?.maps?.DirectionsService) {
@@ -53,12 +53,12 @@ export async function fetchSuggestedRoutes(
           const distMeters = leg?.distance?.value || calculateDistanceMeters(origin.lat, origin.lng, destination.lat, destination.lng);
           const durSec = leg?.duration?.value || Math.round(distMeters / 1.3);
 
-          // Calculate time for trekking (~1.25 m/s)
-          const trekkingSec =
+          // Calculate time for walking (~1.25 m/s)
+          const walkingSec =
             travelMode === 'WALKING' && leg?.duration?.value
               ? leg.duration.value
               : Math.max(60, Math.round(distMeters / 1.25));
-          const trekkingDurationFormatted = formatMinutesDuration(trekkingSec);
+          const walkingDurationFormatted = formatMinutesDuration(walkingSec);
 
           // Calculate time for vehicle (~10 m/s with realistic urban stoplights buffer)
           const vehicleSec =
@@ -66,6 +66,10 @@ export async function fetchSuggestedRoutes(
               ? leg.duration.value
               : Math.max(60, Math.round(distMeters / 10 + 40));
           const vehicleDurationFormatted = formatMinutesDuration(vehicleSec);
+
+          // Calculate flight duration for airplane (~220 m/s or ~800 km/h cruising)
+          const airplaneSec = Math.max(120, Math.round(distMeters / 220 + 180));
+          const airplaneDurationFormatted = formatMinutesDuration(airplaneSec);
 
           const path: Array<{ lat: number; lng: number }> = (route.overview_path || []).map((p: any) => ({
             lat: typeof p.lat === 'function' ? p.lat() : p.lat,
@@ -84,10 +88,14 @@ export async function fetchSuggestedRoutes(
             durationSeconds: durSec,
             durationFormatted: leg?.duration?.text || formatDuration(durSec),
             durationAtCurrentSpeedFormatted: calculateDurationAtCurrentSpeed(distMeters, currentSpeedKmH),
-            trekkingDurationSeconds: trekkingSec,
-            trekkingDurationFormatted,
+            walkingDurationSeconds: walkingSec,
+            walkingDurationFormatted,
+            trekkingDurationSeconds: walkingSec,
+            trekkingDurationFormatted: walkingDurationFormatted,
             vehicleDurationSeconds: vehicleSec,
             vehicleDurationFormatted,
+            airplaneDurationSeconds: airplaneSec,
+            airplaneDurationFormatted,
             travelMode,
             path,
             isFastest: durSec === minDur,
@@ -111,9 +119,10 @@ export async function fetchSuggestedRoutes(
     { lat: destination.lat, lng: destination.lng },
   ];
   const primaryDist = directDist * 1.15;
-  const primaryTrekkingSec = Math.max(60, Math.round(primaryDist / 1.25));
+  const primaryWalkingSec = Math.max(60, Math.round(primaryDist / 1.25));
   const primaryVehicleSec = Math.max(60, Math.round(primaryDist / 10 + 40));
-  const primaryDurSec = travelMode === 'DRIVING' ? primaryVehicleSec : primaryTrekkingSec;
+  const primaryAirplaneSec = Math.max(120, Math.round(primaryDist / 220 + 180));
+  const primaryDurSec = travelMode === 'FLIGHT' ? primaryAirplaneSec : travelMode === 'DRIVING' ? primaryVehicleSec : primaryWalkingSec;
 
   // Alternative route (via opposite corner)
   const altPath = [
@@ -122,9 +131,10 @@ export async function fetchSuggestedRoutes(
     { lat: destination.lat, lng: destination.lng },
   ];
   const altDist = directDist * 1.28;
-  const altTrekkingSec = Math.max(60, Math.round(altDist / 1.2));
+  const altWalkingSec = Math.max(60, Math.round(altDist / 1.2));
   const altVehicleSec = Math.max(60, Math.round(altDist / 9.5 + 50));
-  const altDurSec = travelMode === 'DRIVING' ? altVehicleSec : altTrekkingSec;
+  const altAirplaneSec = Math.max(120, Math.round(altDist / 220 + 210));
+  const altDurSec = travelMode === 'FLIGHT' ? altAirplaneSec : travelMode === 'DRIVING' ? altVehicleSec : altWalkingSec;
 
   return [
     {
@@ -134,10 +144,14 @@ export async function fetchSuggestedRoutes(
       durationSeconds: primaryDurSec,
       durationFormatted: formatMinutesDuration(primaryDurSec),
       durationAtCurrentSpeedFormatted: calculateDurationAtCurrentSpeed(primaryDist, currentSpeedKmH),
-      trekkingDurationSeconds: primaryTrekkingSec,
-      trekkingDurationFormatted: formatMinutesDuration(primaryTrekkingSec),
+      walkingDurationSeconds: primaryWalkingSec,
+      walkingDurationFormatted: formatMinutesDuration(primaryWalkingSec),
+      trekkingDurationSeconds: primaryWalkingSec,
+      trekkingDurationFormatted: formatMinutesDuration(primaryWalkingSec),
       vehicleDurationSeconds: primaryVehicleSec,
       vehicleDurationFormatted: formatMinutesDuration(primaryVehicleSec),
+      airplaneDurationSeconds: primaryAirplaneSec,
+      airplaneDurationFormatted: formatMinutesDuration(primaryAirplaneSec),
       travelMode,
       path: primaryPath,
       isFastest: true,
@@ -151,10 +165,14 @@ export async function fetchSuggestedRoutes(
       durationSeconds: altDurSec,
       durationFormatted: formatMinutesDuration(altDurSec),
       durationAtCurrentSpeedFormatted: calculateDurationAtCurrentSpeed(altDist, currentSpeedKmH),
-      trekkingDurationSeconds: altTrekkingSec,
-      trekkingDurationFormatted: formatMinutesDuration(altTrekkingSec),
+      walkingDurationSeconds: altWalkingSec,
+      walkingDurationFormatted: formatMinutesDuration(altWalkingSec),
+      trekkingDurationSeconds: altWalkingSec,
+      trekkingDurationFormatted: formatMinutesDuration(altWalkingSec),
       vehicleDurationSeconds: altVehicleSec,
       vehicleDurationFormatted: formatMinutesDuration(altVehicleSec),
+      airplaneDurationSeconds: altAirplaneSec,
+      airplaneDurationFormatted: formatMinutesDuration(altAirplaneSec),
       travelMode,
       path: altPath,
       isFastest: false,

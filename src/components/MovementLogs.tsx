@@ -13,6 +13,7 @@ import {
 import {
   Footprints,
   Car,
+  Plane,
   MapPin,
   Clock,
   ArrowRight,
@@ -58,7 +59,7 @@ interface MovementLogsProps {
   onEditStayPointAsMarker?: (place: RecordedPlace) => void;
   onRequestRoute: (dest: { lat: number; lng: number }, name?: string) => void;
   onSelectRoute: (routeId: number) => void;
-  onOpenDataSchema: () => void;
+  onOpenDataSchema?: () => void;
 }
 
 export const MovementLogs: React.FC<MovementLogsProps> = ({
@@ -89,7 +90,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
   onOpenDataSchema,
 }) => {
   const [activeTab, setActiveTab] = useState<'segments' | 'places' | 'markers' | 'routes'>('segments');
-  const [modeFilter, setModeFilter] = useState<'all' | 'trekking' | 'vehicle'>('all');
+  const [modeFilter, setModeFilter] = useState<'all' | 'walking' | 'vehicle' | 'airplane'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Marker search, sorting by user, editing, and deletion states
@@ -288,18 +289,20 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
             </div>
           </div>
 
-          <button
-            id="data-collected-info-btn"
-            onClick={onOpenDataSchema}
-            className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 border transition ${
-              isDark
-                ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
-                : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700 border-zinc-300'
-            }`}
-          >
-            <Gauge className="w-3.5 h-3.5 text-blue-500" />
-            <span className="hidden sm:inline">Schema</span>
-          </button>
+          {onOpenDataSchema && (
+            <button
+              id="data-collected-info-btn"
+              onClick={onOpenDataSchema}
+              className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 border transition ${
+                isDark
+                  ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
+                  : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700 border-zinc-300'
+              }`}
+            >
+              <Gauge className="w-3.5 h-3.5 text-blue-500" />
+              <span className="hidden sm:inline">Schema</span>
+            </button>
+          )}
         </div>
 
         {/* Navigation Tabs (without any shade of blue) */}
@@ -392,9 +395,9 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                   All
                 </button>
                 <button
-                  onClick={() => setModeFilter('trekking')}
+                  onClick={() => setModeFilter('walking')}
                   className={`px-2 py-1 rounded text-[11px] font-medium flex items-center gap-1 transition ${
-                    modeFilter === 'trekking'
+                    modeFilter === 'walking'
                       ? isDark
                         ? 'bg-zinc-800 text-emerald-400'
                         : 'bg-white text-emerald-700 shadow-xs'
@@ -402,20 +405,33 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                   }`}
                 >
                   <Footprints className="w-3 h-3 text-emerald-500" />
-                  Trekking
+                  Walking
                 </button>
                 <button
                   onClick={() => setModeFilter('vehicle')}
                   className={`px-2 py-1 rounded text-[11px] font-medium flex items-center gap-1 transition ${
                     modeFilter === 'vehicle'
                       ? isDark
-                        ? 'bg-zinc-800 text-zinc-200'
-                        : 'bg-white text-zinc-900 shadow-xs'
+                        ? 'bg-zinc-800 text-blue-400'
+                        : 'bg-white text-blue-700 shadow-xs'
                       : 'text-zinc-500 hover:text-zinc-700'
                   }`}
                 >
-                  <Car className="w-3 h-3" />
+                  <Car className="w-3 h-3 text-blue-500" />
                   Vehicle
+                </button>
+                <button
+                  onClick={() => setModeFilter('airplane')}
+                  className={`px-2 py-1 rounded text-[11px] font-medium flex items-center gap-1 transition ${
+                    modeFilter === 'airplane'
+                      ? isDark
+                        ? 'bg-zinc-800 text-purple-400'
+                        : 'bg-white text-purple-700 shadow-xs'
+                      : 'text-zinc-500 hover:text-zinc-700'
+                  }`}
+                >
+                  <Plane className="w-3 h-3 text-purple-500" />
+                  Airplane
                 </button>
               </div>
 
@@ -447,7 +463,8 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
               <div className="space-y-2">
                 {filteredSegments.map((seg, idx) => {
                   const isSelected = seg.id === selectedSegmentId;
-                  const isTrekking = seg.mode === 'trekking';
+                  const isWalking = seg.mode === 'walking';
+                  const isAirplane = seg.mode === 'airplane';
 
                   return (
                     <div
@@ -474,20 +491,24 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                           </span>
                           <span
                             className={`text-[11px] px-2 py-0.5 rounded-full font-semibold flex items-center gap-1 border ${
-                              isTrekking
+                              isWalking
                                 ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
-                                : isDark
-                                ? 'bg-zinc-800 text-zinc-200 border-zinc-700'
-                                : 'bg-zinc-100 text-zinc-800 border-zinc-300'
+                                : isAirplane
+                                ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/30'
+                                : 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30'
                             }`}
                           >
-                            {isTrekking ? (
+                            {isWalking ? (
                               <>
-                                <Footprints className="w-3 h-3" /> Trekking
+                                <Footprints className="w-3 h-3 text-emerald-500" /> Walking
+                              </>
+                            ) : isAirplane ? (
+                              <>
+                                <Plane className="w-3 h-3 text-purple-500" /> Airplane
                               </>
                             ) : (
                               <>
-                                <Car className="w-3 h-3" /> Vehicle
+                                <Car className="w-3 h-3 text-blue-500" /> Vehicle
                               </>
                             )}
                           </span>

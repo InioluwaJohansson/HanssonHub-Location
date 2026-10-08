@@ -1,4 +1,4 @@
-export type TravelMode = 'trekking' | 'vehicle' | 'stationary';
+export type TravelMode = 'walking' | 'vehicle' | 'airplane' | 'stationary';
 
 export type AppTheme = 'light' | 'dark';
 
@@ -42,7 +42,7 @@ export interface AppUser {
   isNavigating: boolean;
   navigationStartTime: number | null;
   speedKmH: number;
-  mode: 'trekking' | 'vehicle';
+  mode: 'walking' | 'vehicle' | 'airplane';
 }
 
 export interface CompletedRouteLog {
@@ -59,7 +59,7 @@ export interface CompletedRouteLog {
   durationFormatted: string;
   distanceMeters: number;
   averageSpeedKmH: number;
-  travelMode: 'WALKING' | 'DRIVING';
+  travelMode: 'WALKING' | 'DRIVING' | 'FLIGHT';
   status: RouteStatus;
   completedAtTimeString: string;
 }
@@ -76,7 +76,7 @@ export interface JourneySegment {
   distanceMeters: number;
   durationSeconds: number;
   averageSpeedKmH: number;
-  mode: 'trekking' | 'vehicle';
+  mode: 'walking' | 'vehicle' | 'airplane';
   startTime: number;
   endTime: number;
 }
@@ -137,11 +137,15 @@ export interface RouteOption {
   durationSeconds: number;
   durationFormatted: string;
   durationAtCurrentSpeedFormatted: string;
-  trekkingDurationSeconds: number;
-  trekkingDurationFormatted: string;
+  walkingDurationSeconds: number;
+  walkingDurationFormatted: string;
   vehicleDurationSeconds: number;
   vehicleDurationFormatted: string;
-  travelMode: 'WALKING' | 'DRIVING';
+  airplaneDurationSeconds?: number;
+  airplaneDurationFormatted?: string;
+  trekkingDurationSeconds?: number;
+  trekkingDurationFormatted?: string;
+  travelMode: 'WALKING' | 'DRIVING' | 'FLIGHT';
   path: Array<{ lat: number; lng: number }>;
   isFastest: boolean;
   steps: string[];
@@ -159,8 +163,9 @@ export interface StationaryState {
 export interface TrackingStats {
   totalDistanceMeters: number;
   totalDurationSeconds: number;
-  trekkingDistanceMeters: number;
+  walkingDistanceMeters: number;
   vehicleDistanceMeters: number;
+  airplaneDistanceMeters: number;
   maxSpeedKmH: number;
   currentSpeedKmH: number;
   placesVisitedCount: number;
@@ -174,4 +179,7 @@ export interface CollectedFieldSpec {
   description: string;
   backendNote: string;
 }
+
+export type { ApiEndpointSpec, SignalRHubSpec } from './schema/apiSchema';
+export { APP_API_ENDPOINTS, SIGNALR_HUB_CONFIG } from './schema/apiSchema';
 

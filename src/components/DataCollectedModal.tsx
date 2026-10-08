@@ -59,8 +59,9 @@ export const DataCollectedModal: React.FC<DataCollectedModalProps> = ({
       icon: Gauge,
       fields: [
         { name: 'Instantaneous Speed', type: 'Float (km/h & m/s)', desc: 'Real-time velocity detected by GPS sensors.' },
-        { name: 'Trekking Mode (≤ 15 km/h)', type: 'Enum (trekking)', desc: 'Walking, jogging, or hiking with footprints icon.' },
-        { name: 'Vehicle Mode (> 15 km/h)', type: 'Enum (vehicle)', desc: 'Motorized transit rendered as blue route path.' },
+        { name: 'Walking Mode (≤ 15 km/h)', type: 'Enum (walking)', desc: 'Walking, jogging, or foot travel with footprints icon.' },
+        { name: 'Vehicle Mode (15 - 200 km/h)', type: 'Enum (vehicle)', desc: 'Motorized transit rendered as blue route path.' },
+        { name: 'Airplane Mode (> 200 km/h)', type: 'Enum (airplane)', desc: 'High-speed aviation flight corridor rendered in purple.' },
         { name: 'Distance (meters)', type: 'Float', desc: 'Calculated geodesic delta between consecutive points.' },
       ],
     },
@@ -73,103 +74,215 @@ export const DataCollectedModal: React.FC<DataCollectedModalProps> = ({
         { name: 'Active Route Suggestions', type: 'Object Array', desc: 'Real street corridors with multi-mode ETAs.' },
       ],
     },
+    {
+      category: '5. Required API Endpoints & Realtime SignalR Hub',
+      icon: Server,
+      fields: [
+        { name: 'GET /api/users', type: 'REST Endpoint', desc: 'Fetch all users & live location points (sorting/date filters done on front-end).' },
+        { name: 'GET /api/users/{id}/location', type: 'REST Endpoint', desc: 'Fetch current location for specific user.' },
+        { name: 'POST /api/routes/calculate', type: 'REST Endpoint', desc: 'Calculate directions & route options.' },
+        { name: 'POST /api/routes/start', type: 'REST Endpoint', desc: 'API endpoint to start route navigation for user.' },
+        { name: 'POST /api/routes/cancel', type: 'REST Endpoint', desc: 'API endpoint to cancel active route navigation.' },
+        { name: 'GET /api/routes/history', type: 'REST Endpoint', desc: 'Fetch route history (date range & sorting handled client-side).' },
+        { name: 'GET /api/markers', type: 'REST Endpoint', desc: 'Fetch custom saved markers.' },
+        { name: 'GET /api/places', type: 'REST Endpoint', desc: 'Fetch recorded stay points.' },
+        { name: 'GET /api/movements/segments', type: 'REST Endpoint', desc: 'Fetch journey movement segments.' },
+        { name: 'WS /LocationTracker', type: 'SignalR Hub', desc: 'Realtime WebSocket stream for location updates, route starts & route cancels (app.MapHub<LocationTrackerHub>("/LocationTracker")).' },
+      ],
+    },
   ];
 
   const backendSchemaSnippet = `// =========================================================================
-// ASP.NET Core 8 / C# Data Models & Controller Methods
+// ASP.NET Core 8 / C# Data Transfer Objects (DTOs) & Controllers
 // RouteTracker Telemetry Ingestion & Storage Architecture
 // =========================================================================
 
-namespace RouteTracker.Models
+namespace RouteTracker.DTOs
 {
-    /// <summary>
-    /// Individual coordinate point recorded during a journey.
-    /// Strictly tied to a specific User, Journey, and optional Route.
-    /// </summary>
-    public class CoordinatePoint
+    using System;
+    using System.Collections.Generic;
+    using System.ComponentModel.DataAnnotations;
+
+    public enum JourneyStatus
     {
-        public Guid Id { get; set; } = Guid.NewGuid();
-        
+        Active = 1,
+        Completed,
+        Cancelled
+    }
+
+    public enum TravelMode
+    {
+        Vehicle = 1,
+        Walking,
+        Airplane
+    }
+
+    // ----------------------------------------------------
+    // ROUTE LOG DTOs
+    // ----------------------------------------------------
+    public class CreateRouteLogDto
+    {
+        public int UserId { get; set; }
+        public int RouteId { get; set; }
+        public int JourneyId { get; set; }
+        public string OriginName { get; set; } = string.Empty;
+        public string DestinationName { get; set; } = string.Empty;
+        public float TotalDistanceMeters { get; set; }
+        public int DurationSeconds { get; set; }
+        public TravelMode TravelMode { get; set; }
+        public DateTimeOffset CompletedAt { get; set; } = DateTimeOffset.UtcNow;
+    }
+
+    public class GetRouteLogDto
+    {
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public int RouteId { get; set; }
+        public int JourneyId { get; set; }
+        public string OriginName { get; set; } = string.Empty;
+        public string DestinationName { get; set; } = string.Empty;
+        public float TotalDistanceMeters { get; set; }
+        public int DurationSeconds { get; set; }
+        public TravelMode TravelMode { get; set; }
+        public DateTimeOffset CompletedAt { get; set; } = DateTimeOffset.UtcNow;
+    }
+
+    public class UpdateRouteLogDto
+    {
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public int RouteId { get; set; }
+        public int JourneyId { get; set; }
+        public string OriginName { get; set; } = string.Empty;
+        public string DestinationName { get; set; } = string.Empty;
+        public float TotalDistanceMeters { get; set; }
+        public int DurationSeconds { get; set; }
+        public TravelMode TravelMode { get; set; }
+        public DateTimeOffset CompletedAt { get; set; } = DateTimeOffset.UtcNow;
+    }
+
+    // ----------------------------------------------------
+    // COORDINATE DTOs
+    // ----------------------------------------------------
+    public class CreateCoordinateDto
+    {
         [Required]
-        public string UserId { get; set; } = string.Empty; // e.g., "user-1" or Auth GUID
-        
+        public int UserId { get; set; }
         [Required]
-        public Guid JourneyId { get; set; } // Identifies the continuous journey session
-        
-        public string? RouteId { get; set; } // Identifies the designated active route corridor
-        
-        public long SequenceIndex { get; set; } // Monotonic order (0, 1, 2, ...) for plotting
-        
+        public int JourneyId { get; set; }
+        public int? RouteId { get; set; }
+        public long SequenceIndex { get; set; }
         public double Latitude { get; set; }
         public double Longitude { get; set; }
         public double? Altitude { get; set; }
         public float? AccuracyMeters { get; set; }
         public float? HeadingDegrees { get; set; }
         public float SpeedKmH { get; set; }
-        public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.UtcNow;
     }
 
-    /// <summary>
-    /// Metadata summarizing a complete user journey session.
-    /// </summary>
-    public class JourneySession
+    public class GetCoordinateDto
     {
-        public Guid Id { get; set; } = Guid.NewGuid();
-        public string UserId { get; set; } = string.Empty;
-        public string UserName { get; set; } = string.Empty;
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public int JourneyId { get; set; }
+        public int? RouteId { get; set; }
+        public long SequenceIndex { get; set; }
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public double? Altitude { get; set; }
+        public float? AccuracyMeters { get; set; }
+        public float? HeadingDegrees { get; set; }
+        public float SpeedKmH { get; set; }
+        public DateTimeOffset Timestamp { get; set; }
+    }
+
+    // ----------------------------------------------------
+    // CUSTOM MARKER DTOs
+    // ----------------------------------------------------
+    public class CreateCustomMarkerDto
+    {
+        [Required]
+        public int UserId { get; set; }
+        public string UserColor { get; set; } = "#3B82F6";
+        [Required]
+        public string Name { get; set; } = string.Empty;
+        public string Category { get; set; } = "generic";
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public bool IsFromStayPoint { get; set; }
+    }
+
+    public class GetCustomMarkerDto
+    {
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public string UserColor { get; set; } = "#3B82F6";
+        public string Name { get; set; } = string.Empty;
+        public string Category { get; set; } = "generic";
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public bool IsFromStayPoint { get; set; }
+        public DateTimeOffset CreatedAt { get; set; }
+    }
+
+    public class UpdateCustomMarkerDto
+    {
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public string UserColor { get; set; } = "#3B82F6";
+        [Required]
+        public string Name { get; set; } = string.Empty;
+        public string Category { get; set; } = "generic";
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public bool IsFromStayPoint { get; set; }
+    }
+
+    // ----------------------------------------------------
+    // JOURNEY SESSION DTOs
+    // ----------------------------------------------------
+    public class CreateJourneySessionDto
+    {
+        public int UserId { get; set; }
         public DateTimeOffset StartTime { get; set; }
         public DateTimeOffset? EndTime { get; set; }
         public float TotalDistanceMeters { get; set; }
         public int TotalDurationSeconds { get; set; }
         public float AverageSpeedKmH { get; set; }
-        public string Status { get; set; } = "Active"; // "Active", "Completed", "Cancelled"
-        public List<CoordinatePoint> Coordinates { get; set; } = new();
+        public JourneyStatus Status { get; set; }
+        public List<CreateCoordinateDto>? Coordinates { get; set; } = new();
     }
 
-    /// <summary>
-    /// Custom map marker tied strictly to a specific user.
-    /// </summary>
-    public class CustomMarker
+    public class GetJourneySessionDto
     {
-        public Guid Id { get; set; } = Guid.NewGuid();
-        
-        [Required]
-        public string UserId { get; set; } = string.Empty; // User that created this marker
-        public string UserName { get; set; } = string.Empty;
-        public string UserColor { get; set; } = "#3B82F6";
-        
-        [Required]
-        public string Name { get; set; } = string.Empty;
-        public string Description { get; set; } = string.Empty;
-        public string Category { get; set; } = "generic"; // work, cafe, home, landmark, store
-        public double Latitude { get; set; }
-        public double Longitude { get; set; }
-        public bool IsFromStayPoint { get; set; }
-        public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
-    }
-
-    /// <summary>
-    /// Completed route log for historical analysis and playback.
-    /// </summary>
-    public class CompletedRouteLog
-    {
-        public Guid Id { get; set; } = Guid.NewGuid();
-        public string UserId { get; set; } = string.Empty;
-        public string RouteId { get; set; } = string.Empty;
-        public Guid JourneyId { get; set; }
-        public string OriginName { get; set; } = string.Empty;
-        public string DestinationName { get; set; } = string.Empty;
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public DateTimeOffset StartTime { get; set; }
+        public DateTimeOffset? EndTime { get; set; }
         public float TotalDistanceMeters { get; set; }
-        public int DurationSeconds { get; set; }
-        public string TravelMode { get; set; } = "vehicle";
-        public DateTimeOffset CompletedAt { get; set; } = DateTimeOffset.UtcNow;
+        public int TotalDurationSeconds { get; set; }
+        public float AverageSpeedKmH { get; set; }
+        public JourneyStatus Status { get; set; }
+        public List<GetCoordinateDto>? Coordinates { get; set; } = new();
+    }
+
+    public class UpdateJourneySessionDto
+    {
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public DateTimeOffset StartTime { get; set; }
+        public DateTimeOffset? EndTime { get; set; }
+        public float TotalDistanceMeters { get; set; }
+        public int TotalDurationSeconds { get; set; }
+        public float AverageSpeedKmH { get; set; }
+        public JourneyStatus Status { get; set; }
     }
 }
 
 namespace RouteTracker.Controllers
 {
     using Microsoft.AspNetCore.Mvc;
-    using RouteTracker.Models;
+    using RouteTracker.DTOs;
 
     /// <summary>
     /// Backend API Controller for telemetry data ingestion, saving and querying.
@@ -186,59 +299,60 @@ namespace RouteTracker.Controllers
         }
 
         /// <summary>
-        /// 1. Start a new journey session for a user.
-        /// POST /api/telemetry/journeys/start
+        /// 1. Create a new journey session for a user.
+        /// POST /api/telemetry/journeys
         /// </summary>
-        [HttpPost("journeys/start")]
-        public async Task<ActionResult<JourneySession>> StartJourney([FromBody] StartJourneyDto dto)
+        [HttpPost("journeys")]
+        public async Task<ActionResult<GetJourneySessionDto>> CreateJourney([FromBody] CreateJourneySessionDto dto)
         {
-            var session = await _telemetryService.CreateJourneyAsync(dto.UserId, dto.UserName);
-            return Ok(session);
+            var session = await _telemetryService.CreateJourneyAsync(dto);
+            return CreatedAtAction(nameof(GetJourneyById), new { id = session.Id }, session);
         }
 
         /// <summary>
-        /// 2. Stream and save a single coordinate point (silently recorded).
+        /// 2. Post a new coordinate point for a journey.
         /// POST /api/telemetry/coordinates
         /// </summary>
         [HttpPost("coordinates")]
-        public async Task<IActionResult> SaveCoordinate([FromBody] CoordinatePoint point)
+        public async Task<ActionResult<GetCoordinateDto>> CreateCoordinate([FromBody] CreateCoordinateDto dto)
         {
-            await _telemetryService.SaveCoordinateAsync(point);
-            return StatusCode(201);
+            var saved = await _telemetryService.SaveCoordinateAsync(dto);
+            return StatusCode(201, saved);
         }
 
         /// <summary>
-        /// 3. Ingest a batch of coordinates for high-throughput buffering.
-        /// POST /api/telemetry/coordinates/batch
-        /// </summary>
-        [HttpPost("coordinates/batch")]
-        public async Task<IActionResult> SaveCoordinateBatch([FromBody] List<CoordinatePoint> points)
-        {
-            await _telemetryService.SaveBatchAsync(points);
-            return Ok(new { insertedCount = points.Count });
-        }
-
-        /// <summary>
-        /// 4. Complete an active journey session and compute aggregates.
-        /// PUT /api/telemetry/journeys/{journeyId}/complete
-        /// </summary>
-        [HttpPut("journeys/{journeyId:guid}/complete")]
-        public async Task<IActionResult> CompleteJourney(Guid journeyId, [FromBody] CompleteJourneyDto dto)
-        {
-            var result = await _telemetryService.CompleteJourneyAsync(journeyId, dto);
-            return Ok(result);
-        }
-
-        /// <summary>
-        /// 5. Save a custom marker tied to a specific user.
+        /// 3. Create a custom saved marker.
         /// POST /api/telemetry/markers
         /// </summary>
         [HttpPost("markers")]
-        public async Task<ActionResult<CustomMarker>> CreateMarker([FromBody] CustomMarker marker)
+        public async Task<ActionResult<GetCustomMarkerDto>> CreateMarker([FromBody] CreateCustomMarkerDto dto)
         {
-            var saved = await _telemetryService.SaveMarkerAsync(marker);
-            return CreatedAtAction(nameof(GetMarkersByUser), new { userId = marker.UserId }, saved);
+            var saved = await _telemetryService.CreateMarkerAsync(dto);
+            return CreatedAtAction(nameof(GetMarkerById), new { id = saved.Id }, saved);
         }
+
+        /// <summary>
+        /// 4. Update custom saved marker by ID.
+        /// PUT /api/telemetry/markers/{id}
+        /// </summary>
+        [HttpPut("markers/{id:int}")]
+        public async Task<ActionResult<GetCustomMarkerDto>> UpdateMarker(int id, [FromBody] UpdateCustomMarkerDto dto)
+        {
+            var updated = await _telemetryService.UpdateMarkerAsync(id, dto);
+            return Ok(updated);
+        }
+
+        /// <summary>
+        /// 5. Update journey session status and metrics.
+        /// PUT /api/telemetry/journeys/{id}
+        /// </summary>
+        [HttpPut("journeys/{id:int}")]
+        public async Task<ActionResult<GetJourneySessionDto>> UpdateJourney(int id, [FromBody] UpdateJourneySessionDto dto)
+        {
+            var updated = await _telemetryService.UpdateJourneyAsync(id, dto);
+            return Ok(updated);
+        }
+    }
 
         /// <summary>
         /// 6. Query coordinate trail for a specific user and journey.
@@ -255,7 +369,7 @@ namespace RouteTracker.Controllers
         }
 
         /// <summary>
-        /// 7. Retrieve all custom markers created by a user.
+        /// 7. Retrieve all custom markers created by a user (No backend sorting; done on client).
         /// GET /api/telemetry/markers?userId={userId}
         /// </summary>
         [HttpGet("markers")]
@@ -263,6 +377,52 @@ namespace RouteTracker.Controllers
         {
             var markers = await _telemetryService.GetMarkersByUserAsync(userId);
             return Ok(markers);
+        }
+
+        /// <summary>
+        /// 8. Start route navigation session.
+        /// POST /api/routes/start
+        /// </summary>
+        [HttpPost("/api/routes/start")]
+        public async Task<IActionResult> StartRoute([FromBody] StartRouteDto dto)
+        {
+            await _telemetryService.StartRouteAsync(dto);
+            await _hubContext.Clients.All.SendAsync("ReceiveRouteStarted", dto.UserId, dto.DestinationName, dto.DestinationCoords);
+            return Ok(new { success = true, status = "active" });
+        }
+
+        /// <summary>
+        /// 9. Cancel active route navigation session.
+        /// POST /api/routes/cancel
+        /// </summary>
+        [HttpPost("/api/routes/cancel")]
+        public async Task<IActionResult> CancelRoute([FromBody] CancelRouteDto dto)
+        {
+            var log = await _telemetryService.CancelRouteAsync(dto);
+            await _hubContext.Clients.All.SendAsync("ReceiveRouteCancelled", dto.UserId, dto.DestinationName, dto.DurationSeconds);
+            return Ok(new { success = true, logId = log.Id, status = "cancelled" });
+        }
+    }
+
+    /// <summary>
+    /// SignalR Realtime Hub for live location streaming, route starts and cancels.
+    /// URL: /LocationTracker (app.MapHub<LocationTrackerHub>("/LocationTracker");)
+    /// </summary>
+    public class LocationTrackerHub : Hub
+    {
+        public async Task SendLocationUpdate(string userId, double lat, double lng, double speed)
+        {
+            await Clients.Others.SendAsync("ReceiveLocationUpdate", userId, lat, lng, speed);
+        }
+
+        public async Task StartRoute(string userId, string destName, object destCoords)
+        {
+            await Clients.Others.SendAsync("ReceiveRouteStarted", userId, destName, destCoords);
+        }
+
+        public async Task CancelRoute(string userId, string destName, int durationSeconds)
+        {
+            await Clients.Others.SendAsync("ReceiveRouteCancelled", userId, destName, durationSeconds);
         }
     }
 }`;
@@ -331,8 +491,8 @@ namespace RouteTracker.Controllers
               The application samples continuous GPS points from the browser Geolocation API. Points
               are grouped into consecutive <strong>Journey Segments</strong> (with timestamps,
               coordinates, and speed). Speed is used to automatically classify whether you
-              trekked (&le; 15 km/h, shown with footprints icon) or traveled in a vehicle (&gt; 15 km/h,
-              rendered as a dotted blue line). Stationary locations are recorded as places, custom markers can
+              walked (&le; 15 km/h, shown with footprints icon), traveled in a vehicle (15&ndash;200 km/h,
+              rendered as a dotted blue line), or flew on an airplane (&gt; 200 km/h, rendered as a purple flight corridor). Stationary locations are recorded as places, custom markers can
               be placed anywhere on the map, and suggested routes provide turn-by-turn durations at your current moving speed.
             </p>
           </div>
