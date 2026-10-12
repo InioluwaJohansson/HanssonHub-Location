@@ -8,6 +8,7 @@ import {
   RouteOption,
   AppTheme,
   AppUser,
+  ContentTypeFilter,
 } from '../types';
 import {
   createUserAvatarIcon,
@@ -17,6 +18,7 @@ import {
   calculateDistanceMeters,
   formatDistance,
 } from '../utils/geo';
+import { formatProfileImageUrl } from '../utils/auth';
 
 interface MapOverlaysProps {
   segments: JourneySegment[];
@@ -27,10 +29,14 @@ interface MapOverlaysProps {
   selectedRouteId: number | null;
   selectedSegmentId: number | null;
   userName?: string;
+  userAvatarUrl?: string;
   isNavigating?: boolean;
   theme?: AppTheme;
   allUsers?: AppUser[];
   selectedUserIdFilter?: number | 'all';
+  contentTypeFilter?: ContentTypeFilter;
+  onRequestRoute?: (dest: { lat: number; lng: number }, destName?: string) => void;
+  onSelectUser?: (userId: number) => void;
   onSelectPlace?: (place: RecordedPlace) => void;
   onSelectCustomMarker?: (marker: CustomMarker) => void;
   onSelectRoute?: (routeId: number) => void;
@@ -135,10 +141,14 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
   selectedRouteId,
   selectedSegmentId,
   userName = 'Inioluwa',
+  userAvatarUrl,
   isNavigating = false,
   theme = 'light',
   allUsers,
   selectedUserIdFilter,
+  contentTypeFilter = 'all',
+  onRequestRoute,
+  onSelectUser,
   onSelectPlace,
   onSelectCustomMarker,
   onSelectRoute,
@@ -183,6 +193,8 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
     // Clear existing polylines
     polylinesRef.current.forEach((line) => line.setMap(null));
     polylinesRef.current = [];
+
+    if (contentTypeFilter === 'markers') return;
 
     segments.forEach((seg) => {
       const isSelected = seg.id === selectedSegmentId;
@@ -263,7 +275,7 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
       polylinesRef.current.forEach((line) => line.setMap(null));
       polylinesRef.current = [];
     };
-  }, [map, segments, selectedSegmentId]);
+  }, [map, segments, selectedSegmentId, contentTypeFilter]);
 
   // Sync Route options & Small Modals next to each route:
   // Routes must be blue when proceeding to a marker / taking a route, and alternative routes light blue.
@@ -277,7 +289,7 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
     routeBadgeOverlaysRef.current.forEach((o) => o.setMap(null));
     routeBadgeOverlaysRef.current = [];
 
-    if (routes.length === 0) return;
+    if (routes.length === 0 || contentTypeFilter === 'markers') return;
 
     routes.forEach((route, idx) => {
       const isSelected = selectedRouteId ? route.id === selectedRouteId : route.isFastest;
@@ -391,9 +403,9 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
   }, [map, routes, selectedRouteId, isNavigating, isDark, onSelectRoute]);
 
   const placeMarkersMapRef = useRef<Map<number, google.maps.Marker>>(new Map());
-  const customMarkersMapRef = useRef<Map<number, google.maps.Marker>>(new Map());
+  const customMarkerOverlaysMapRef = useRef<Map<number, CustomMarkerOverlay>>(new Map());
 
-  // Sync Recorded Places Markers (anti-blinking in-place updates)
+  // Sync Recorded Places Markers (anti-blinking in-place updates, shown at all times)
   useEffect(() => {
     if (!map || typeof google === 'undefined' || !google.maps) return;
 
@@ -443,7 +455,8 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
     });
   }, [map, recordedPlaces, userName, onSelectPlace]);
 
-  // Sync Custom Markers added by users (anti-blinking in-place updates)
+  // Sync Custom Markers added by users: DOM-based CustomMarkerOverlay
+  // Shows name below the point on the map, and on hover displays name and category
   useEffect(() => {
     if (!map || typeof google === 'undefined' || !google.maps) return;
 
@@ -451,50 +464,664 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
 
     customMarkers.forEach((cm) => {
       activeMarkerIds.add(cm.id);
-      const iconData = getCachedPlaceMarkerIcon(cm.category, false, cm.userColor);
-      let marker = customMarkersMapRef.current.get(cm.id);
+      let overlay = customMarkerOverlaysMapRef.current.get(cm.id);
 
-      if (!marker) {
-        marker = new google.maps.Marker({
-          position: { lat: cm.lat, lng: cm.lng },
-          map: map,
-          title: `${cm.name} (Tied to: ${cm.userName || userName})`,
-          icon: {
-            url: iconData.url,
-            scaledSize: iconData.scaledSize,
-            anchor: iconData.anchor,
+      if (!overlay) {
+        overlay = new CustomMarkerOverlay(
+          cm,
+          isDark,
+          () => {
+            if (onSelectCustomMarker) {
+              onSelectCustomMarker(cm);
+            }
           },
-          zIndex: 28,
-        });
-
-        marker.addListener('click', () => {
-          if (onSelectCustomMarker) {
-            onSelectCustomMarker(cm);
-          }
-        });
-
-        customMarkersMapRef.current.set(cm.id, marker);
+          onRequestRoute
+        );
+        overlay.setMap(map);
+        customMarkerOverlaysMapRef.current.set(cm.id, overlay);
       } else {
-        marker.setMap(map);
-        const curPos = marker.getPosition();
-        if (!curPos || curPos.lat() !== cm.lat || curPos.lng() !== cm.lng) {
-          marker.setPosition({ lat: cm.lat, lng: cm.lng });
-        }
+        overlay.setMap(map);
+        overlay.update(cm, isDark, onRequestRoute);
       }
     });
 
-    customMarkersMapRef.current.forEach((marker, id) => {
+    customMarkerOverlaysMapRef.current.forEach((overlay, id) => {
       if (!activeMarkerIds.has(id)) {
-        marker.setMap(null);
-        customMarkersMapRef.current.delete(id);
+        overlay.setMap(null);
+        customMarkerOverlaysMapRef.current.delete(id);
       }
     });
-  }, [map, customMarkers, userName, onSelectCustomMarker]);
+  }, [map, customMarkers, userName, onSelectCustomMarker, onRequestRoute, isDark]);
+
+/**
+ * Custom Google Maps OverlayView for Custom Markers.
+ * Shows the pin with selected color, displays the marker name below the point on the map,
+ * and on hover shows the name, category, and a button to Route to Marker adhering to theme.
+ */
+class CustomMarkerOverlay extends google.maps.OverlayView {
+  private pos: { lat: number; lng: number };
+  private marker: CustomMarker;
+  private isDark: boolean;
+  private onClickHandler: () => void;
+  private onRequestRoute?: (dest: { lat: number; lng: number }, destName?: string) => void;
+  private containerEl: HTMLDivElement;
+  private hoverCardEl: HTMLDivElement | null = null;
+  private hideTimeout: any = null;
+
+  constructor(
+    marker: CustomMarker,
+    isDark: boolean,
+    onClick: () => void,
+    onRequestRoute?: (dest: { lat: number; lng: number }, destName?: string) => void
+  ) {
+    super();
+    this.marker = marker;
+    this.pos = { lat: marker.lat, lng: marker.lng };
+    this.isDark = isDark;
+    this.onClickHandler = onClick;
+    this.onRequestRoute = onRequestRoute;
+
+    this.containerEl = document.createElement('div');
+    this.containerEl.className = 'custom-marker-overlay-container';
+    this.containerEl.style.position = 'absolute';
+    this.containerEl.style.transform = 'translate(-50%, -100%)';
+    this.containerEl.style.cursor = 'pointer';
+    this.containerEl.style.zIndex = '35';
+    this.containerEl.style.display = 'flex';
+    this.containerEl.style.flexDirection = 'column';
+    this.containerEl.style.alignItems = 'center';
+    this.containerEl.style.pointerEvents = 'auto';
+    this.containerEl.style.userSelect = 'none';
+
+    this.renderContent();
+
+    this.containerEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.onClickHandler();
+    });
+  }
+
+  private renderContent() {
+    this.containerEl.innerHTML = '';
+    const safeName = (this.marker.name || 'Marker').trim();
+    const markerColor = this.marker.userColor || '#3B82F6';
+    const category = (this.marker.category || 'generic').trim();
+
+    // 1. Hover Card (Popover on hover above point showing Name, Category, and Route to marker button)
+    const hoverCard = document.createElement('div');
+    hoverCard.className = 'custom-marker-hover-card';
+    hoverCard.style.position = 'absolute';
+    hoverCard.style.bottom = 'calc(100% + 6px)';
+    hoverCard.style.left = '50%';
+    hoverCard.style.transform = 'translateX(-50%)';
+    hoverCard.style.minWidth = '150px';
+    hoverCard.style.padding = '9px 12px';
+    hoverCard.style.borderRadius = '14px';
+    hoverCard.style.backgroundColor = this.isDark ? '#18181b' : '#ffffff';
+    hoverCard.style.color = this.isDark ? '#f4f4f5' : '#18181b';
+    hoverCard.style.border = `1px solid ${this.isDark ? '#27272a' : '#e4e4e7'}`;
+    hoverCard.style.boxShadow = '0 12px 28px -4px rgba(0,0,0,0.45)';
+    hoverCard.style.whiteSpace = 'nowrap';
+    hoverCard.style.pointerEvents = 'auto';
+    hoverCard.style.display = 'none';
+    hoverCard.style.flexDirection = 'column';
+    hoverCard.style.alignItems = 'center';
+    hoverCard.style.gap = '6px';
+    hoverCard.style.zIndex = '120';
+    hoverCard.style.cursor = 'default';
+
+    // Marker Name
+    const nameEl = document.createElement('div');
+    nameEl.style.fontSize = '12px';
+    nameEl.style.fontWeight = '800';
+    nameEl.style.lineHeight = '1.2';
+    nameEl.style.textAlign = 'center';
+    nameEl.style.maxWidth = '180px';
+    nameEl.style.overflow = 'hidden';
+    nameEl.style.textOverflow = 'ellipsis';
+    nameEl.innerText = safeName;
+    hoverCard.appendChild(nameEl);
+
+    // Category Badge
+    const catBadge = document.createElement('span');
+    catBadge.style.display = 'inline-block';
+    catBadge.style.padding = '2px 8px';
+    catBadge.style.borderRadius = '9999px';
+    catBadge.style.fontSize = '10px';
+    catBadge.style.fontWeight = '700';
+    catBadge.style.backgroundColor = `${markerColor}20`;
+    catBadge.style.color = markerColor;
+    catBadge.style.border = `1px solid ${markerColor}40`;
+    catBadge.style.textTransform = 'capitalize';
+    catBadge.innerText = category;
+    hoverCard.appendChild(catBadge);
+
+    // Route to marker button
+    const routeMarkerBtn = document.createElement('button');
+    routeMarkerBtn.type = 'button';
+    routeMarkerBtn.style.width = '100%';
+    routeMarkerBtn.style.marginTop = '4px';
+    routeMarkerBtn.style.padding = '5px 10px';
+    routeMarkerBtn.style.borderRadius = '8px';
+    routeMarkerBtn.style.fontSize = '11px';
+    routeMarkerBtn.style.fontWeight = '700';
+    routeMarkerBtn.style.display = 'flex';
+    routeMarkerBtn.style.alignItems = 'center';
+    routeMarkerBtn.style.justifyContent = 'center';
+    routeMarkerBtn.style.gap = '5px';
+    routeMarkerBtn.style.backgroundColor = '#2563eb';
+    routeMarkerBtn.style.color = '#ffffff';
+    routeMarkerBtn.style.border = 'none';
+    routeMarkerBtn.style.cursor = 'pointer';
+    routeMarkerBtn.style.boxShadow = '0 2px 6px rgba(37,99,235,0.35)';
+    routeMarkerBtn.style.transition = 'background-color 0.15s';
+    routeMarkerBtn.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="6" cy="19" r="3"></circle>
+        <path d="M9 19h8.5a4.5 4.5 0 0 0 0-9H11"></path>
+        <polyline points="14 7 11 10 14 13"></polyline>
+      </svg>
+      <span>Route to marker</span>
+    `;
+
+    routeMarkerBtn.addEventListener('mouseenter', () => {
+      routeMarkerBtn.style.backgroundColor = '#1d4ed8';
+    });
+    routeMarkerBtn.addEventListener('mouseleave', () => {
+      routeMarkerBtn.style.backgroundColor = '#2563eb';
+    });
+    routeMarkerBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (this.onRequestRoute) {
+        this.onRequestRoute({ lat: this.marker.lat, lng: this.marker.lng }, this.marker.name);
+      }
+    });
+
+    hoverCard.appendChild(routeMarkerBtn);
+
+    // Caret downward pointer
+    const arrow = document.createElement('div');
+    arrow.style.position = 'absolute';
+    arrow.style.bottom = '-6px';
+    arrow.style.left = '50%';
+    arrow.style.transform = 'translateX(-50%)';
+    arrow.style.width = '0';
+    arrow.style.height = '0';
+    arrow.style.borderLeft = '6px solid transparent';
+    arrow.style.borderRight = '6px solid transparent';
+    arrow.style.borderTop = `6px solid ${this.isDark ? '#27272a' : '#e4e4e7'}`;
+    hoverCard.appendChild(arrow);
+
+    this.containerEl.appendChild(hoverCard);
+    this.hoverCardEl = hoverCard;
+
+    // Hover listener to reveal hover card with smooth debounce
+    this.containerEl.addEventListener('mouseenter', () => {
+      if (this.hideTimeout) clearTimeout(this.hideTimeout);
+      if (this.hoverCardEl) {
+        this.hoverCardEl.style.display = 'flex';
+      }
+    });
+    this.containerEl.addEventListener('mouseleave', () => {
+      this.hideTimeout = setTimeout(() => {
+        if (this.hoverCardEl) {
+          this.hoverCardEl.style.display = 'none';
+        }
+      }, 150);
+    });
+
+    // 2. The Pin Icon with marker color
+    const pin = document.createElement('div');
+    pin.style.width = '24px';
+    pin.style.height = '24px';
+    pin.style.borderRadius = '50% 50% 50% 0';
+    pin.style.transform = 'rotate(-45deg)';
+    pin.style.backgroundColor = markerColor;
+    pin.style.border = '2px solid #ffffff';
+    pin.style.boxShadow = '0 3px 8px rgba(0,0,0,0.35)';
+    pin.style.display = 'flex';
+    pin.style.alignItems = 'center';
+    pin.style.justifyContent = 'center';
+
+    const innerDot = document.createElement('div');
+    innerDot.style.width = '7px';
+    innerDot.style.height = '7px';
+    innerDot.style.borderRadius = '50%';
+    innerDot.style.backgroundColor = '#ffffff';
+    innerDot.style.transform = 'rotate(45deg)';
+    pin.appendChild(innerDot);
+
+    this.containerEl.appendChild(pin);
+
+    // 3. Name of custom marker BELOW the point
+    const nameLabel = document.createElement('div');
+    nameLabel.style.marginTop = '4px';
+    nameLabel.style.padding = '1.5px 7px';
+    nameLabel.style.borderRadius = '9999px';
+    nameLabel.style.backgroundColor = this.isDark ? '#18181b' : '#ffffff';
+    nameLabel.style.border = `1.5px solid ${markerColor}`;
+    nameLabel.style.color = this.isDark ? '#f4f4f5' : '#18181b';
+    nameLabel.style.fontSize = '10px';
+    nameLabel.style.fontWeight = '700';
+    nameLabel.style.letterSpacing = '0.2px';
+    nameLabel.style.whiteSpace = 'nowrap';
+    nameLabel.style.textAlign = 'center';
+    nameLabel.style.maxWidth = '130px';
+    nameLabel.style.overflow = 'hidden';
+    nameLabel.style.textOverflow = 'ellipsis';
+    nameLabel.style.boxShadow = '0 2px 6px rgba(0,0,0,0.25)';
+    nameLabel.innerText = safeName;
+    this.containerEl.appendChild(nameLabel);
+  }
+
+  onAdd() {
+    const panes = this.getPanes();
+    if (panes) {
+      panes.overlayMouseTarget.appendChild(this.containerEl);
+    }
+  }
+
+  draw() {
+    const projection = this.getProjection();
+    if (!projection) return;
+    const point = projection.fromLatLngToDivPixel(
+      new google.maps.LatLng(this.pos.lat, this.pos.lng)
+    );
+    if (point) {
+      this.containerEl.style.left = `${point.x}px`;
+      this.containerEl.style.top = `${point.y}px`;
+    }
+  }
+
+  update(
+    marker: CustomMarker,
+    isDark: boolean,
+    onRequestRoute?: (dest: { lat: number; lng: number }, destName?: string) => void
+  ) {
+    const changed =
+      this.marker.name !== marker.name ||
+      this.marker.category !== marker.category ||
+      this.marker.userColor !== marker.userColor ||
+      this.isDark !== isDark ||
+      this.onRequestRoute !== onRequestRoute;
+    this.marker = marker;
+    this.pos = { lat: marker.lat, lng: marker.lng };
+    this.isDark = isDark;
+    this.onRequestRoute = onRequestRoute;
+    if (changed) {
+      this.renderContent();
+    }
+    this.draw();
+  }
+
+  onRemove() {
+    if (this.containerEl.parentNode) {
+      this.containerEl.parentNode.removeChild(this.containerEl);
+    }
+  }
+}
+
+/**
+ * Custom Google Maps OverlayView for placing real DOM elements with <img> tags for user avatars.
+ * This completely eliminates SVG data URL limitations and Canvas cross-origin tainting,
+ * guaranteeing that user profile images always show up crisply on the map for all users.
+ */
+class UserMarkerOverlay extends google.maps.OverlayView {
+  private pos: { lat: number; lng: number };
+  private user: AppUser;
+  private isDark: boolean;
+  private onClickHandler: () => void;
+  private onRouteToUser?: (pos: { lat: number; lng: number }, name: string) => void;
+  private containerEl: HTMLDivElement;
+  private hoverCardEl: HTMLDivElement | null = null;
+  private fallbackAvatarUrl?: string;
+
+  constructor(
+    pos: { lat: number; lng: number },
+    user: AppUser,
+    isDark: boolean,
+    onClick: () => void,
+    fallbackAvatarUrl?: string,
+    onRouteToUser?: (pos: { lat: number; lng: number }, name: string) => void
+  ) {
+    super();
+    this.pos = pos;
+    this.user = user;
+    this.isDark = isDark;
+    this.onClickHandler = onClick;
+    this.fallbackAvatarUrl = fallbackAvatarUrl;
+    this.onRouteToUser = onRouteToUser;
+
+    this.containerEl = document.createElement('div');
+    this.containerEl.className = 'user-marker-overlay-container';
+    this.containerEl.style.position = 'absolute';
+    this.containerEl.style.transform = 'translate(-50%, -46px)';
+    this.containerEl.style.cursor = 'pointer';
+    this.containerEl.style.zIndex = user.isCurrentUser ? '75' : '50';
+    this.containerEl.style.display = 'flex';
+    this.containerEl.style.flexDirection = 'column';
+    this.containerEl.style.alignItems = 'center';
+    this.containerEl.style.pointerEvents = 'auto';
+    this.containerEl.style.userSelect = 'none';
+
+    this.renderContent();
+
+    this.containerEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.onClickHandler();
+    });
+  }
+
+  private renderContent() {
+    this.containerEl.innerHTML = '';
+    const safeName = (this.user.name || 'User').trim();
+    const initial = safeName.charAt(0).toUpperCase();
+    const userColor = this.user.color || '#3B82F6';
+    const rawAvatar = this.user.avatar || (this.user.isCurrentUser ? this.fallbackAvatarUrl : '') || '';
+    const avatarUrl = formatProfileImageUrl(rawAvatar);
+
+    // Hover card for another user with Route to User button (adheres to theme, no coordinates, no active user text)
+    if (!this.user.isCurrentUser) {
+      const hoverCard = document.createElement('div');
+      hoverCard.className = 'user-hover-card';
+      hoverCard.style.position = 'absolute';
+      hoverCard.style.bottom = 'calc(100% + 8px)';
+      hoverCard.style.left = '50%';
+      hoverCard.style.transform = 'translateX(-50%)';
+      hoverCard.style.minWidth = '160px';
+      hoverCard.style.padding = '10px 12px';
+      hoverCard.style.borderRadius = '14px';
+      hoverCard.style.backgroundColor = this.isDark ? '#18181b' : '#ffffff';
+      hoverCard.style.color = this.isDark ? '#f4f4f5' : '#18181b';
+      hoverCard.style.border = `1px solid ${this.isDark ? '#27272a' : '#e4e4e7'}`;
+      hoverCard.style.boxShadow = '0 12px 28px -4px rgba(0,0,0,0.45)';
+      hoverCard.style.display = 'none';
+      hoverCard.style.flexDirection = 'column';
+      hoverCard.style.alignItems = 'center';
+      hoverCard.style.gap = '8px';
+      hoverCard.style.zIndex = '120';
+      hoverCard.style.cursor = 'default';
+
+      // User Avatar in card
+      const avatarContainer = document.createElement('div');
+      avatarContainer.style.width = '40px';
+      avatarContainer.style.height = '40px';
+      avatarContainer.style.borderRadius = '50%';
+      avatarContainer.style.overflow = 'hidden';
+      avatarContainer.style.border = `2.5px solid ${userColor}`;
+      avatarContainer.style.display = 'flex';
+      avatarContainer.style.alignItems = 'center';
+      avatarContainer.style.justifyContent = 'center';
+      avatarContainer.style.backgroundColor = `${userColor}20`;
+      avatarContainer.style.flexShrink = '0';
+      avatarContainer.style.boxShadow = '0 2px 6px rgba(0,0,0,0.2)';
+
+      if (avatarUrl) {
+        const img = document.createElement('img');
+        img.src = avatarUrl;
+        img.alt = safeName;
+        img.style.width = '100%';
+        img.style.height = '100%';
+        img.style.objectFit = 'cover';
+        img.onerror = () => {
+          img.remove();
+          avatarContainer.innerText = initial;
+          avatarContainer.style.fontSize = '15px';
+          avatarContainer.style.fontWeight = 'bold';
+          avatarContainer.style.color = userColor;
+        };
+        avatarContainer.appendChild(img);
+      } else {
+        avatarContainer.innerText = initial;
+        avatarContainer.style.fontSize = '15px';
+        avatarContainer.style.fontWeight = 'bold';
+        avatarContainer.style.color = userColor;
+      }
+      hoverCard.appendChild(avatarContainer);
+
+      // User Name
+      const nameEl = document.createElement('div');
+      nameEl.style.fontSize = '12px';
+      nameEl.style.fontWeight = '800';
+      nameEl.style.color = this.isDark ? '#f4f4f5' : '#18181b';
+      nameEl.style.textAlign = 'center';
+      nameEl.innerText = safeName;
+      hoverCard.appendChild(nameEl);
+
+      // Route to user button
+      const routeBtn = document.createElement('button');
+      routeBtn.type = 'button';
+      routeBtn.style.width = '100%';
+      routeBtn.style.padding = '6px 12px';
+      routeBtn.style.borderRadius = '10px';
+      routeBtn.style.fontSize = '11px';
+      routeBtn.style.fontWeight = '700';
+      routeBtn.style.display = 'flex';
+      routeBtn.style.alignItems = 'center';
+      routeBtn.style.justifyContent = 'center';
+      routeBtn.style.gap = '6px';
+      routeBtn.style.backgroundColor = '#2563eb';
+      routeBtn.style.color = '#ffffff';
+      routeBtn.style.border = 'none';
+      routeBtn.style.cursor = 'pointer';
+      routeBtn.style.boxShadow = '0 2px 8px rgba(37,99,235,0.35)';
+      routeBtn.style.transition = 'background-color 0.15s';
+      routeBtn.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="6" cy="19" r="3"></circle>
+          <path d="M9 19h8.5a4.5 4.5 0 0 0 0-9H11"></path>
+          <polyline points="14 7 11 10 14 13"></polyline>
+        </svg>
+        <span>Route to user</span>
+      `;
+
+      routeBtn.addEventListener('mouseenter', () => {
+        routeBtn.style.backgroundColor = '#1d4ed8';
+      });
+      routeBtn.addEventListener('mouseleave', () => {
+        routeBtn.style.backgroundColor = '#2563eb';
+      });
+
+      routeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.onRouteToUser) {
+          this.onRouteToUser(this.pos, this.user.name);
+        }
+      });
+
+      hoverCard.appendChild(routeBtn);
+
+      // Caret downward pointer
+      const arrow = document.createElement('div');
+      arrow.style.position = 'absolute';
+      arrow.style.bottom = '-6px';
+      arrow.style.left = '50%';
+      arrow.style.transform = 'translateX(-50%)';
+      arrow.style.width = '0';
+      arrow.style.height = '0';
+      arrow.style.borderLeft = '6px solid transparent';
+      arrow.style.borderRight = '6px solid transparent';
+      arrow.style.borderTop = `6px solid ${this.isDark ? '#27272a' : '#e4e4e7'}`;
+      hoverCard.appendChild(arrow);
+
+      this.containerEl.appendChild(hoverCard);
+      this.hoverCardEl = hoverCard;
+
+      let hideTimeout: any = null;
+      this.containerEl.addEventListener('mouseenter', () => {
+        if (hideTimeout) clearTimeout(hideTimeout);
+        if (this.hoverCardEl) this.hoverCardEl.style.display = 'flex';
+      });
+      this.containerEl.addEventListener('mouseleave', () => {
+        hideTimeout = setTimeout(() => {
+          if (this.hoverCardEl) this.hoverCardEl.style.display = 'none';
+        }, 150);
+      });
+    }
+
+    // Outer wrapper for ring + online green dot
+    const wrapper = document.createElement('div');
+    wrapper.style.position = 'relative';
+    wrapper.style.width = '38px';
+    wrapper.style.height = '38px';
+
+    // Ring circle
+    const ring = document.createElement('div');
+    ring.style.width = '38px';
+    ring.style.height = '38px';
+    ring.style.borderRadius = '50%';
+    ring.style.backgroundColor = userColor;
+    ring.style.border = '2.5px solid #ffffff';
+    ring.style.boxShadow = '0 4px 10px rgba(0,0,0,0.35)';
+    ring.style.overflow = 'hidden';
+    ring.style.display = 'flex';
+    ring.style.alignItems = 'center';
+    ring.style.justifyContent = 'center';
+
+    const fallback = document.createElement('div');
+    fallback.style.width = '100%';
+    fallback.style.height = '100%';
+    fallback.style.display = avatarUrl ? 'none' : 'flex';
+    fallback.style.alignItems = 'center';
+    fallback.style.justifyContent = 'center';
+    fallback.style.fontWeight = '800';
+    fallback.style.fontSize = '14px';
+    fallback.style.color = '#ffffff';
+    fallback.innerText = initial;
+
+    if (avatarUrl) {
+      const img = document.createElement('img');
+      img.src = avatarUrl;
+      img.alt = safeName;
+      img.style.width = '100%';
+      img.style.height = '100%';
+      img.style.objectFit = 'cover';
+      img.style.display = 'block';
+      let retried = false;
+      img.onerror = () => {
+        if (!retried && avatarUrl.includes('/storage/')) {
+          retried = true;
+          const storageSubPath = avatarUrl.split('/storage/')[1];
+          if (avatarUrl.startsWith('http')) {
+            img.src = `/storage/${storageSubPath}`;
+            return;
+          } else {
+            img.src = `https://kv5zhpcr-7044.uks1.devtunnels.ms/storage/${storageSubPath}`;
+            return;
+          }
+        }
+        img.style.display = 'none';
+        fallback.style.display = 'flex';
+      };
+      img.onload = () => {
+        img.style.display = 'block';
+        fallback.style.display = 'none';
+      };
+      ring.appendChild(img);
+    }
+    ring.appendChild(fallback);
+    wrapper.appendChild(ring);
+
+    // Online indicator green dot
+    const onlineDot = document.createElement('div');
+    onlineDot.style.position = 'absolute';
+    onlineDot.style.top = '-1px';
+    onlineDot.style.right = '-1px';
+    onlineDot.style.width = '10px';
+    onlineDot.style.height = '10px';
+    onlineDot.style.borderRadius = '50%';
+    onlineDot.style.backgroundColor = '#10b981';
+    onlineDot.style.border = '2px solid #ffffff';
+    onlineDot.style.boxShadow = '0 1px 3px rgba(0,0,0,0.3)';
+    wrapper.appendChild(onlineDot);
+
+    this.containerEl.appendChild(wrapper);
+
+    // Downward stem pointer
+    const stem = document.createElement('div');
+    stem.style.width = '0';
+    stem.style.height = '0';
+    stem.style.borderLeft = '4px solid transparent';
+    stem.style.borderRight = '4px solid transparent';
+    stem.style.borderTop = `5px solid ${userColor}`;
+    stem.style.margin = '0 auto';
+    this.containerEl.appendChild(stem);
+
+    // User Name Pill Label
+    const pill = document.createElement('div');
+    pill.style.marginTop = '2px';
+    pill.style.padding = '1.5px 7px';
+    pill.style.borderRadius = '9999px';
+    pill.style.backgroundColor = '#18181b';
+    pill.style.border = `1.5px solid ${userColor}`;
+    pill.style.color = '#ffffff';
+    pill.style.fontSize = '10px';
+    pill.style.fontWeight = '700';
+    pill.style.letterSpacing = '0.2px';
+    pill.style.whiteSpace = 'nowrap';
+    pill.style.textAlign = 'center';
+    pill.style.boxShadow = '0 2px 6px rgba(0,0,0,0.4)';
+    pill.innerText = safeName;
+    this.containerEl.appendChild(pill);
+  }
+
+  onAdd() {
+    const panes = this.getPanes();
+    if (panes) {
+      panes.overlayMouseTarget.appendChild(this.containerEl);
+    }
+  }
+
+  draw() {
+    const projection = this.getProjection();
+    if (!projection) return;
+    const point = projection.fromLatLngToDivPixel(
+      new google.maps.LatLng(this.pos.lat, this.pos.lng)
+    );
+    if (point) {
+      this.containerEl.style.left = `${point.x}px`;
+      this.containerEl.style.top = `${point.y}px`;
+    }
+  }
+
+  update(
+    pos: { lat: number; lng: number },
+    user: AppUser,
+    isDark: boolean,
+    fallbackAvatarUrl?: string,
+    onRouteToUser?: (pos: { lat: number; lng: number }, name: string) => void
+  ) {
+    const avatarChanged = this.user.avatar !== user.avatar || this.fallbackAvatarUrl !== fallbackAvatarUrl;
+    const nameChanged = this.user.name !== user.name;
+    const colorChanged = this.user.color !== user.color;
+    const isDarkChanged = this.isDark !== isDark;
+    this.pos = pos;
+    this.user = user;
+    this.isDark = isDark;
+    if (fallbackAvatarUrl !== undefined) {
+      this.fallbackAvatarUrl = fallbackAvatarUrl;
+    }
+    if (onRouteToUser !== undefined) {
+      this.onRouteToUser = onRouteToUser;
+    }
+    this.containerEl.style.zIndex = user.isCurrentUser ? '75' : '50';
+
+    if (avatarChanged || nameChanged || colorChanged || isDarkChanged) {
+      this.renderContent();
+    }
+    this.draw();
+  }
+
+  onRemove() {
+    if (this.containerEl.parentNode) {
+      this.containerEl.parentNode.removeChild(this.containerEl);
+    }
+  }
+}
 
   // Multi-User Markers & Active Route Lines: Render all active users and their active route paths
-  const userMarkersRef = useRef<Map<number, google.maps.Marker>>(new Map());
-  const userMarkerIconKeysRef = useRef<Map<number, string>>(new Map());
-  const lastVisualPositionsRef = useRef<Map<number | string, { lat: number; lng: number }>>(new Map());
+  const userMarkerOverlaysRef = useRef<Map<number, UserMarkerOverlay>>(new Map());
+  const singleUserOverlayRef = useRef<UserMarkerOverlay | null>(null);
   const userRoutePolylinesRef = useRef<Map<number, google.maps.Polyline>>(new Map());
   const userInfoWindowRef = useRef<google.maps.InfoWindow | null>(null);
 
@@ -548,37 +1175,134 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
     };
   }, [map, allUsers, selectedUserIdFilter]);
 
-  // Synchronize User Avatars smoothly with anti-flicker icon cache and continuous dynamic movement
+  // Synchronize User Avatars with UserMarkerOverlay (DOM-based OverlayView)
   useEffect(() => {
     if (!map || typeof google === 'undefined' || !google.maps) return;
+
+    const openUserInfoWindow = (user: AppUser, pos: { lat: number; lng: number }) => {
+      if (!userInfoWindowRef.current) {
+        userInfoWindowRef.current = new google.maps.InfoWindow();
+      }
+
+      const bgColor = isDark ? '#09090b' : '#ffffff';
+      const textColor = isDark ? '#f4f4f5' : '#18181b';
+      const cardBg = isDark ? '#18181b' : '#f4f4f5';
+      const subTextColor = isDark ? '#a1a1aa' : '#71717a';
+      const borderColor = isDark ? '#27272a' : '#e4e4e7';
+      const userAvatar = formatProfileImageUrl(user.avatar || (user.isCurrentUser ? userAvatarUrl : ''));
+
+      const contentString = `
+        <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; max-width: 250px; background-color: ${bgColor}; color: ${textColor}; border-radius: 16px; border: 1px solid ${borderColor}; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3);">
+          <!-- User Avatar Centered on Top -->
+          <div style="text-align: center; margin-bottom: 8px;">
+            ${userAvatar ? `<img src="${userAvatar}" alt="${user.name}" style="width: 52px; height: 52px; border-radius: 50%; object-fit: cover; margin: 0 auto; border: 3px solid ${user.color || '#3b82f6'}; box-shadow: 0 4px 8px rgba(0,0,0,0.2);" onerror="this.style.display='none';" />` : ''}
+          </div>
+          
+          <!-- User Name -->
+          <div style="text-align: center; margin-bottom: 8px;">
+            <div style="font-size: 14px; font-weight: 800; color: ${textColor}; line-height: 1.2;">${user.name}</div>
+            ${user.isCurrentUser ? `
+              <div style="margin-top: 3px;">
+                <span style="display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 700; background-color: ${user.color || '#3b82f6'}20; color: ${user.color || '#3b82f6'}; border: 1px solid ${user.color || '#3b82f6'}40;">
+                  Primary User
+                </span>
+              </div>
+            ` : ''}
+          </div>
+
+          <!-- Details Card (No coordinates, No active user text) -->
+          <div style="background-color: ${cardBg}; border-radius: 12px; padding: 10px; font-size: 11px; line-height: 1.5; border: 1px solid ${borderColor};">
+            <div style="color: ${textColor};">
+              <strong style="color: ${subTextColor}; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; display: block;">Status</strong>
+              ${user.isCurrentUser ? 'Live GPS Location' : 'Connected'}
+            </div>
+            ${!user.isCurrentUser ? `
+              <div style="margin-top: 8px;">
+                <button id="info-route-to-user-btn" style="width: 100%; padding: 6px 12px; border-radius: 10px; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 6px; background-color: #2563eb; color: #ffffff; border: none; cursor: pointer; box-shadow: 0 2px 8px rgba(37,99,235,0.35);">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="6" cy="19" r="3"></circle>
+                    <path d="M9 19h8.5a4.5 4.5 0 0 0 0-9H11"></path>
+                    <polyline points="14 7 11 10 14 13"></polyline>
+                  </svg>
+                  <span>Route to user</span>
+                </button>
+              </div>
+            ` : ''}
+          </div>
+        </div>
+      `;
+      userInfoWindowRef.current.setContent(contentString);
+      userInfoWindowRef.current.setPosition(new google.maps.LatLng(pos.lat, pos.lng));
+      userInfoWindowRef.current.open(map);
+
+      if (!user.isCurrentUser && onRequestRoute) {
+        google.maps.event.addListenerOnce(userInfoWindowRef.current, 'domready', () => {
+          const btn = document.getElementById('info-route-to-user-btn');
+          if (btn) {
+            btn.onclick = () => {
+              onRequestRoute(pos, user.name);
+              userInfoWindowRef.current?.close();
+            };
+          }
+        });
+      }
+
+      if (onSelectUser) {
+        onSelectUser(user.id);
+      }
+    };
 
     if (!allUsers || allUsers.length === 0) {
       // Fallback single-user rendering if allUsers is empty
       if (currentPoint && typeof currentPoint.lat === 'number' && typeof currentPoint.lng === 'number') {
         const pos = { lat: currentPoint.lat, lng: currentPoint.lng };
-        const avatarIcon = getCachedUserAvatarIcon(userName, '#3B82F6');
+        const dummyUser: AppUser = {
+          id: 1,
+          name: userName,
+          avatar: userAvatarUrl || '',
+          color: '#3B82F6',
+          isCurrentUser: true,
+          currentPoint,
+          isTracking: true,
+          isStationary: false,
+          stationaryStartTime: null,
+          dwellDurationSeconds: 0,
+          activeDestinationName: null,
+          activeDestinationCoords: null,
+          isNavigating: false,
+          navigationStartTime: null,
+          speedKmH: 0,
+          mode: 'vehicle',
+        };
 
-        if (!currentMarkerRef.current) {
-          currentMarkerRef.current = new google.maps.Marker({
-            position: pos,
-            map: map,
-            title: `${userName}'s Location`,
-            icon: { url: avatarIcon.url, scaledSize: avatarIcon.scaledSize, anchor: avatarIcon.anchor },
-            zIndex: 50,
-          });
-          lastVisualPositionsRef.current.set('single-user', pos);
+        if (!singleUserOverlayRef.current) {
+          singleUserOverlayRef.current = new UserMarkerOverlay(
+            pos,
+            dummyUser,
+            isDark,
+            () => openUserInfoWindow(dummyUser, pos),
+            userAvatarUrl,
+            onRequestRoute ? (p, n) => onRequestRoute(p, n) : undefined
+          );
+          singleUserOverlayRef.current.setMap(map);
         } else {
-          currentMarkerRef.current.setPosition(pos);
-          lastVisualPositionsRef.current.set('single-user', pos);
+          singleUserOverlayRef.current.setMap(map);
+          singleUserOverlayRef.current.update(
+            pos,
+            dummyUser,
+            isDark,
+            userAvatarUrl,
+            onRequestRoute ? (p, n) => onRequestRoute(p, n) : undefined
+          );
         }
       }
       return;
     }
 
-    // Clear single user marker if using multi-user map
-    if (currentMarkerRef.current) {
-      currentMarkerRef.current.setMap(null);
-      currentMarkerRef.current = null;
+    // Clear single-user fallback overlay if using multi-user map
+    if (singleUserOverlayRef.current) {
+      singleUserOverlayRef.current.setMap(null);
+      singleUserOverlayRef.current = null;
     }
 
     const currentActiveIds = new Set<number>();
@@ -594,111 +1318,39 @@ export const MapOverlays: React.FC<MapOverlaysProps> = ({
 
       currentActiveIds.add(user.id);
       const pos = { lat: user.currentPoint.lat, lng: user.currentPoint.lng };
-      const iconKey = `${user.name}_${user.color || '#3B82F6'}_${user.avatar || 'none'}`;
-      const avatarIcon = getCachedUserAvatarIcon(user.name, user.color || '#3B82F6', user.avatar);
-      const titleText = `${user.name} | From: ${user.originName || 'Starting Point'} ➔ To: ${user.activeDestinationName || 'Destination'} (${(user.speedKmH || 0).toFixed(1)} km/h)`;
 
-      let marker = userMarkersRef.current.get(user.id);
-      if (!marker) {
-        marker = new google.maps.Marker({
-          position: pos,
-          map: map,
-          title: titleText,
-          icon: {
-            url: avatarIcon.url,
-            scaledSize: avatarIcon.scaledSize,
-            anchor: avatarIcon.anchor,
-          },
-          zIndex: user.isCurrentUser ? 60 : 40,
-        });
-
-        userMarkerIconKeysRef.current.set(user.id, iconKey);
-        lastVisualPositionsRef.current.set(user.id, pos);
-
-        marker.addListener('click', () => {
-          if (!userInfoWindowRef.current) {
-            userInfoWindowRef.current = new google.maps.InfoWindow();
-          }
-
-          const bgColor = isDark ? '#09090b' : '#ffffff';
-          const textColor = isDark ? '#f4f4f5' : '#18181b';
-          const cardBg = isDark ? '#18181b' : '#f4f4f5';
-          const subTextColor = isDark ? '#a1a1aa' : '#71717a';
-          const borderColor = isDark ? '#27272a' : '#e4e4e7';
-          const userAvatar = user.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(user.name)}&background=3b82f6&color=fff`;
-
-          const contentString = `
-            <div style="font-family: system-ui, -apple-system, sans-serif; padding: 12px; max-width: 250px; background-color: ${bgColor}; color: ${textColor}; border-radius: 16px; border: 1px solid ${borderColor}; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3);">
-              <!-- User Avatar Centered on Top -->
-              <div style="text-align: center; margin-bottom: 8px;">
-                <img src="${userAvatar}" alt="${user.name}" style="width: 52px; height: 52px; border-radius: 50%; object-fit: cover; margin: 0 auto; border: 3px solid ${user.color || '#3b82f6'}; box-shadow: 0 4px 8px rgba(0,0,0,0.2);" />
-              </div>
-              
-              <!-- User Name & Role Badge -->
-              <div style="text-align: center; margin-bottom: 10px;">
-                <div style="font-size: 14px; font-weight: 800; color: ${textColor}; line-height: 1.2;">${user.name}</div>
-                <div style="margin-top: 3px;">
-                  <span style="display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 700; background-color: ${user.color || '#3b82f6'}20; color: ${user.color || '#3b82f6'}; border: 1px solid ${user.color || '#3b82f6'}40;">
-                    ${user.role || 'Traveler'}
-                  </span>
-                </div>
-              </div>
-
-              <!-- Location & Trip Details Card -->
-              <div style="background-color: ${cardBg}; border-radius: 12px; padding: 10px; font-size: 11px; line-height: 1.5; border: 1px solid ${borderColor};">
-                <div style="margin-bottom: 4px; color: ${textColor};">
-                  <strong style="color: ${subTextColor}; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; display: block;">From</strong>
-                  ${user.originName || 'Starting Point'}
-                </div>
-                <div style="margin-bottom: 4px; color: ${textColor};">
-                  <strong style="color: ${subTextColor}; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; display: block;">Destination</strong>
-                  ${user.activeDestinationName || 'En route destination'}
-                </div>
-                <div style="color: ${textColor}; padding-top: 2px;">
-                  <strong style="color: ${subTextColor}; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; display: block;">Current Speed</strong>
-                  <span style="font-weight: 700; color: ${user.color || '#3b82f6'};">${(user.speedKmH || 0).toFixed(1)} km/h</span> (${user.mode === 'walking' ? 'Walking 🚶' : user.mode === 'airplane' ? 'Airplane ✈️' : 'Vehicle 🚗'})
-                </div>
-              </div>
-            </div>
-          `;
-          userInfoWindowRef.current.setContent(contentString);
-          userInfoWindowRef.current.open(map, marker);
-        });
-
-        userMarkersRef.current.set(user.id, marker);
+      let overlay = userMarkerOverlaysRef.current.get(user.id);
+      if (!overlay) {
+        overlay = new UserMarkerOverlay(
+          pos,
+          user,
+          isDark,
+          () => openUserInfoWindow(user, pos),
+          user.isCurrentUser ? userAvatarUrl : undefined,
+          onRequestRoute ? (p, n) => onRequestRoute(p, n) : undefined
+        );
+        overlay.setMap(map);
+        userMarkerOverlaysRef.current.set(user.id, overlay);
       } else {
-        marker.setMap(map);
-
-        // Anti-blinking: ONLY setIcon if the user's color, name, or avatar actually changed!
-        if (userMarkerIconKeysRef.current.get(user.id) !== iconKey) {
-          marker.setIcon({
-            url: avatarIcon.url,
-            scaledSize: avatarIcon.scaledSize,
-            anchor: avatarIcon.anchor,
-          });
-          userMarkerIconKeysRef.current.set(user.id, iconKey);
-        }
-
-        // Dynamically update marker position seamlessly on every movement tick
-        marker.setPosition(pos);
-        lastVisualPositionsRef.current.set(user.id, pos);
-
-        if (marker.getTitle() !== titleText) {
-          marker.setTitle(titleText);
-        }
+        overlay.setMap(map);
+        overlay.update(
+          pos,
+          user,
+          isDark,
+          user.isCurrentUser ? userAvatarUrl : undefined,
+          onRequestRoute ? (p, n) => onRequestRoute(p, n) : undefined
+        );
       }
     });
 
-    // Remove markers for users no longer rendered
-    userMarkersRef.current.forEach((marker, userId) => {
+    // Remove overlays for users no longer rendered
+    userMarkerOverlaysRef.current.forEach((overlay, userId) => {
       if (!currentActiveIds.has(userId)) {
-        marker.setMap(null);
-        userMarkersRef.current.delete(userId);
-        userMarkerIconKeysRef.current.delete(userId);
-        lastVisualPositionsRef.current.delete(userId);
+        overlay.setMap(null);
+        userMarkerOverlaysRef.current.delete(userId);
       }
     });
-  }, [map, allUsers, selectedUserIdFilter, currentPoint, userName, isDark]);
+  }, [map, allUsers, selectedUserIdFilter, currentPoint, userName, isDark, onRequestRoute]);
 
   return null;
 };

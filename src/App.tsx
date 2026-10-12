@@ -15,6 +15,8 @@ import {
   AppTheme,
   AppUser,
   CompletedRouteLog,
+  ContentTypeFilter,
+  TimeRangeFilter,
 } from './types';
 import {
   calculateDistanceMeters,
@@ -24,13 +26,8 @@ import {
   reverseGeocode,
   formatDuration,
 } from './utils/geo';
-import { fetchRouteOptions, generateAbeokutaRoadPath, fetchRealRoadPath } from './utils/routing';
+import { fetchRouteOptions } from './utils/routing';
 import {
-  INITIAL_DEMO_USERS,
-  getInitialDemoUsers,
-  INITIAL_COMPLETED_ROUTES,
-  INITIAL_DEMO_MARKERS,
-  INITIAL_RECORDED_PLACES,
   PALETTE_30_COLORS,
   ABEOKUTA_LOCATIONS,
 } from './utils/users';
@@ -40,19 +37,30 @@ import {
   initSignalRConnection,
   sendStartRouteSignal,
   sendCancelRouteSignal,
+  onMarkerAdded,
+  onMarkerUpdated,
+  onMarkerDeleted,
+  onJourneySessionStarted,
+  onJourneySessionUpdated,
+  onJourneySessionCancelled,
+  onRouteLogAdded,
+  onRouteLogUpdated,
 } from './utils/signalrClient';
-import { locationTrackerService } from './services/locationTrackerService';
+import { locationTrackerService, CreateCoordinatePayload } from './services/locationTrackerService';
 import { MapTracker } from './components/MapTracker';
 import { MovementLogs } from './components/MovementLogs';
 import { HeaderBar } from './components/HeaderBar';
 import { LoginOverlay } from './components/LoginOverlay';
 import { LogoutConfirmModal } from './components/LogoutConfirmModal';
+import { NotificationStack } from './components/NotificationStack';
 import {
   getStoredAuthToken,
   getStoredAuthUser,
   getStoredAuthImageUrl,
   clearStoredAuth,
   AuthUserData,
+  formatUserFullName,
+  formatProfileImageUrl,
 } from './utils/auth';
 import { AlertCircle, Map, Layers, ChevronLeft, ChevronRight, Bell } from 'lucide-react';
 
@@ -86,25 +94,51 @@ export default function App() {
 
   // User Profile
   const userName = authUser?.userName || 'inioluwa_johansson';
+  const userFullName = formatUserFullName(authUser, userName);
 
-  // Multi-User Management
+  // Multi-User Management - prioritize real backend user data
   const [allUsers, setAllUsers] = useState<AppUser[]>(() => {
-    const users = getInitialDemoUsers();
     const storedUser = getStoredAuthUser();
     const storedImage = getStoredAuthImageUrl();
     if (storedUser) {
-      return users.map((u) =>
-        u.id === 1 || u.isCurrentUser
-          ? {
-              ...u,
-              id: storedUser.id,
-              name: storedUser.userName,
-              avatar: storedImage || u.avatar,
-            }
-          : u
-      );
+      const fullName = formatUserFullName(storedUser, storedUser.userName);
+      return [
+        {
+          id: storedUser.id,
+          name: fullName,
+          avatar: storedImage ? formatProfileImageUrl(storedImage) : '',
+          color: PALETTE_30_COLORS[0],
+          isCurrentUser: true,
+          currentPoint: {
+            id: 1000 + storedUser.id,
+            userId: storedUser.id,
+            journeyId: 5000 + storedUser.id,
+            routeId: 6000 + storedUser.id,
+            lat: 7.1475,
+            lng: 3.3619,
+            accuracy: 8,
+            speed: 0,
+            speedMps: 0,
+            timestamp: Date.now(),
+            timeString: new Date().toLocaleTimeString(),
+          },
+          isTracking: true,
+          isStationary: true,
+          stationaryStartTime: null,
+          dwellDurationSeconds: 0,
+          originName: 'Starting Point',
+          originCoords: { lat: 7.1475, lng: 3.3619 },
+          activeDestinationName: null,
+          activeDestinationCoords: null,
+          activeRoutePath: undefined,
+          isNavigating: false,
+          navigationStartTime: null,
+          speedKmH: 0,
+          mode: 'vehicle',
+        },
+      ];
     }
-    return users;
+    return [];
   });
 
   const handleLoginSuccess = (token: string, userData: AuthUserData, imageUrl: string) => {
@@ -114,19 +148,84 @@ export default function App() {
     setIsLoginOverlayOpen(false);
     setIsTracking(true); // Start live tracking upon successful login
 
-    // Update primary user details across active users list
-    setAllUsers((prevUsers) =>
-      prevUsers.map((u) =>
-        u.id === 1 || u.isCurrentUser
-          ? {
-              ...u,
-              id: userData.id,
-              name: userData.userName,
-              avatar: imageUrl,
-            }
-          : u
-      )
-    );
+    // Load real users directly from ASP.NET Core backend
+    locationTrackerService.getAllUsers().then((backendUsers) => {
+      if (backendUsers && Array.isArray(backendUsers) && backendUsers.length > 0) {
+        const activeUsersList = backendUsers.filter((u) => !u.isHidden);
+        if (activeUsersList.length > 0) {
+          const mappedUsers: AppUser[] = activeUsersList.map((u, idx) => {
+            const isCurrent = u.id === userData.id;
+            const resolvedAvatar = isCurrent && imageUrl ? imageUrl : formatProfileImageUrl(u.imageUrl);
+            const userLat = 7.1475 + (idx % 3 === 0 ? 0.005 : -0.005) * (Math.floor(idx / 3) + 1);
+            const userLng = 3.3619 + (idx % 2 === 0 ? 0.006 : -0.006) * (Math.floor(idx / 2) + 1);
+
+            return {
+              id: u.id,
+              name: u.name,
+              avatar: resolvedAvatar,
+              color: PALETTE_30_COLORS[idx % PALETTE_30_COLORS.length],
+              isCurrentUser: isCurrent,
+              currentPoint: isCurrent && currentPoint ? currentPoint : {
+                id: 1000 + u.id,
+                userId: u.id,
+                journeyId: 5000 + u.id,
+                routeId: 6000 + u.id,
+                lat: userLat,
+                lng: userLng,
+                accuracy: 8,
+                speed: 0,
+                speedMps: 0,
+                timestamp: Date.now(),
+                timeString: new Date().toLocaleTimeString(),
+              },
+              isTracking: true,
+              isStationary: true,
+              stationaryStartTime: null,
+              dwellDurationSeconds: 0,
+              originName: 'Starting Point',
+              originCoords: { lat: userLat, lng: userLng },
+              activeDestinationName: null,
+              activeDestinationCoords: null,
+              activeRoutePath: undefined,
+              isNavigating: false,
+              navigationStartTime: null,
+              speedKmH: 0,
+              mode: 'vehicle',
+            };
+          });
+          setAllUsers(mappedUsers);
+          return;
+        }
+      }
+      // Fallback update current user
+      const fullName = formatUserFullName(userData, userData.userName);
+      setAllUsers((prevUsers) =>
+        prevUsers.map((u) =>
+          u.id === userData.id || u.isCurrentUser
+            ? {
+                ...u,
+                id: userData.id,
+                name: fullName,
+                avatar: imageUrl,
+              }
+            : u
+        )
+      );
+    }).catch(() => {
+      const fullName = formatUserFullName(userData, userData.userName);
+      setAllUsers((prevUsers) =>
+        prevUsers.map((u) =>
+          u.id === userData.id || u.isCurrentUser
+            ? {
+                ...u,
+                id: userData.id,
+                name: fullName,
+                avatar: imageUrl,
+              }
+            : u
+        )
+      );
+    });
   };
 
   const handleLogoutConfirm = () => {
@@ -139,8 +238,8 @@ export default function App() {
     setIsTracking(false); // Immediately stop live location recording upon logout
   };
   const [selectedUserIdFilter, setSelectedUserIdFilter] = useState<number | 'all'>('all');
-  const [contentTypeFilter, setContentTypeFilter] = useState<'all' | 'markers' | 'routes' | 'movements'>('all');
-  const [timeRangeFilter, setTimeRangeFilter] = useState<'all' | '1w' | '2w' | '1m' | '3m' | '6m'>('1w');
+  const [contentTypeFilter, setContentTypeFilter] = useState<ContentTypeFilter>('all');
+  const [timeRangeFilter, setTimeRangeFilter] = useState<TimeRangeFilter>('1w');
   const [completedRoutes, setCompletedRoutes] = useState<CompletedRouteLog[]>(() =>
     safeLoadStorage(STORAGE_KEYS.COMPLETED_ROUTES, [])
   );
@@ -177,6 +276,7 @@ export default function App() {
   const [activeDestinationCoords, setActiveDestinationCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [isNavigating, setIsNavigating] = useState<boolean>(false);
   const [navigationStartTime, setNavigationStartTime] = useState<number | null>(null);
+  const [activeJourneySessionId, setActiveJourneySessionId] = useState<number | null>(null);
 
   // Stationary state tracking
   const [stationaryState, setStationaryState] = useState<StationaryState>({
@@ -211,6 +311,7 @@ export default function App() {
   });
   const isRecordingPlaceRef = useRef<boolean>(false);
   const segmentSeqRef = useRef<number>(0);
+  const coordinateBufferRef = useRef<CreateCoordinatePayload[]>([]);
 
   // Sync data to localStorage on changes to prevent data loss on crashes or reloads
   useEffect(() => {
@@ -291,20 +392,20 @@ export default function App() {
       if (!authToken || !authUser) return;
 
       const now = timestamp || Date.now();
-      const currentJourneyId = activeJourneyIdRef.current;
+      const currentJourneyId = activeJourneySessionId || activeJourneyIdRef.current || 0;
 
       const newPoint: LocationPoint = {
         id: now + (coordinateSeqRef.current % 1000),
-        userId: 1,
+        userId: authUser.id,
         journeyId: currentJourneyId,
-        routeId: selectedRouteId || undefined,
+        routeId: 0,
         sequenceIndex: coordinateSeqRef.current++,
         lat: coords.latitude,
         lng: coords.longitude,
-        accuracy: coords.accuracy || 10,
-        altitude: coords.altitude,
-        altitudeAccuracy: coords.altitudeAccuracy,
-        heading: coords.heading,
+        accuracy: Math.round(coords.accuracy || 10),
+        altitude: Math.round(coords.altitude || 0),
+        altitudeAccuracy: Math.round(coords.altitudeAccuracy || 0),
+        heading: Math.round(coords.heading || 0),
         speed: coords.speed != null && coords.speed >= 0 ? coords.speed * 3.6 : 0,
         speedMps: coords.speed != null && coords.speed >= 0 ? coords.speed : 0,
         timestamp: now,
@@ -315,19 +416,29 @@ export default function App() {
         }),
       };
 
-      // Stream coordinate update to ASP.NET Core backend endpoint POST /LocationTracker/Coordinate/CreateCoordinate
-      locationTrackerService.createCoordinate({
+      const coordinatePayload: CreateCoordinatePayload = {
         userId: authUser.id,
-        journeyId: currentJourneyId || 1,
-        routeId: selectedRouteId || undefined,
+        journeyId: currentJourneyId,
+        routeId: 0,
         sequenceIndex: newPoint.sequenceIndex || 0,
         latitude: coords.latitude,
         longitude: coords.longitude,
-        altitude: coords.altitude || undefined,
-        accuracyMeters: coords.accuracy || undefined,
-        headingDegrees: coords.heading || undefined,
-        speedKmH: newPoint.speed || 0,
-      });
+        altitude: Math.round(coords.altitude || 0),
+        accuracyMeters: Math.round(coords.accuracy || 0),
+        headingDegrees: Math.round(coords.heading || 0),
+        speedKmH: Math.round(newPoint.speed || 0),
+      };
+
+      // POST /LocationTracker/Coordinate/CreateCoordinate
+      locationTrackerService.createCoordinate(coordinatePayload);
+
+      // Buffer coordinates and send batch updates via POST /LocationTracker/Coordinate/CreateBatchCoordinates
+      coordinateBufferRef.current.push(coordinatePayload);
+      if (coordinateBufferRef.current.length >= 10) {
+        const batch = [...coordinateBufferRef.current];
+        coordinateBufferRef.current = [];
+        locationTrackerService.createBatchCoordinates(batch);
+      }
       const lastVisual = lastVisualPointRef.current;
       let isSignificantMovement = false;
       if (!lastVisual) {
@@ -654,47 +765,85 @@ export default function App() {
     // Fetch initial backend custom markers
     locationTrackerService.getAllCustomMarkers().then((backendMarkers) => {
       if (backendMarkers && Array.isArray(backendMarkers) && backendMarkers.length > 0) {
-        const mapped: CustomMarker[] = backendMarkers.map((m) => ({
-          id: m.id,
-          userId: m.userId,
-          userName: m.userId === authUser.id ? userName : `User #${m.userId}`,
-          userColor: m.userColor || PALETTE_30_COLORS[m.userId % PALETTE_30_COLORS.length],
-          lat: m.latitude,
-          lng: m.longitude,
-          name: m.name,
-          description: `Category: ${m.category || 'generic'}`,
-          category: (m.category as any) || 'generic',
-          createdAt: new Date(m.createdAt).getTime() || Date.now(),
-          isFromStayPoint: m.isFromStayPoint,
-        }));
-        setCustomMarkers(mapped);
-      } else {
-        // If backend returned empty or unavailable, check local storage or fallback option
-        setCustomMarkers((prev) => {
-          if (prev.length > 0) return prev;
-          return INITIAL_DEMO_MARKERS;
+        const mapped: CustomMarker[] = backendMarkers.map((m) => {
+          const matchedUser = allUsers.find((u) => u.id === m.userId);
+          return {
+            id: m.id,
+            userId: m.userId,
+            userName: m.userId === authUser.id ? userFullName : (matchedUser ? matchedUser.name : `User #${m.userId}`),
+            userColor: m.userColor || PALETTE_30_COLORS[m.userId % PALETTE_30_COLORS.length],
+            lat: m.latitude,
+            lng: m.longitude,
+            name: m.name,
+            description: `Category: ${m.category || 'generic'}`,
+            category: (m.category as any) || 'generic',
+            createdAt: new Date(m.createdAt).getTime() || Date.now(),
+            isFromStayPoint: m.isFromStayPoint,
+          };
         });
+        setCustomMarkers(mapped);
       }
-    }).catch(() => {
-      setCustomMarkers((prev) => {
-        if (prev.length > 0) return prev;
-        return INITIAL_DEMO_MARKERS;
-      });
+    }).catch((err) => {
+      console.warn('API Warning [getAllCustomMarkers]:', err);
+    });
+
+    // Fetch initial backend journey sessions
+    locationTrackerService.getAllJourneySessions().then((backendSessions) => {
+      if (backendSessions && Array.isArray(backendSessions) && backendSessions.length > 0) {
+        const currentUserId = authUser ? authUser.id : 1;
+        const mappedSessions: CompletedRouteLog[] = backendSessions.map((s) => {
+          const isCompleted = s.status === 2;
+          const startTimeMs = new Date(s.startTime).getTime() || Date.now();
+          const endTimeMs = s.endTime ? new Date(s.endTime).getTime() : startTimeMs + (s.totalDurationSeconds || 60) * 1000;
+          const isMe = s.userId === currentUserId;
+          const matchedUser = allUsers.find((u) => u.id === s.userId);
+          return {
+            id: s.id,
+            userId: s.userId,
+            userName: isMe ? userFullName : (matchedUser ? matchedUser.name : `User #${s.userId}`),
+            userColor: PALETTE_30_COLORS[s.userId % PALETTE_30_COLORS.length],
+            userAvatar: isMe ? (userAvatarUrl || '') : (matchedUser?.avatar || ''),
+            destinationName: `Journey Session #${s.id}`,
+            destinationCoords: s.coordinates && s.coordinates.length > 0
+              ? { lat: s.coordinates[s.coordinates.length - 1].latitude, lng: s.coordinates[s.coordinates.length - 1].longitude }
+              : { lat: 7.1475, lng: 3.3619 },
+            startTime: startTimeMs,
+            endTime: endTimeMs,
+            durationSeconds: s.totalDurationSeconds || Math.max(1, Math.round((endTimeMs - startTimeMs) / 1000)),
+            durationFormatted: formatDuration(s.totalDurationSeconds || 60),
+            distanceMeters: s.totalDistanceMeters || 0,
+            averageSpeedKmH: s.averageSpeedKmH || 0,
+            travelMode: 'DRIVING',
+            status: isCompleted ? 'completed' : 'cancelled',
+            completedAtTimeString: new Date(endTimeMs).toLocaleString('en-US', {
+              weekday: 'short',
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+          };
+        });
+        setCompletedRoutes(mappedSessions);
+      }
+    }).catch((err) => {
+      console.warn('API Warning [getAllJourneySessions]:', err);
     });
 
     // Fetch initial backend route logs
     locationTrackerService.getAllRouteLogs().then((backendLogs) => {
       if (backendLogs && Array.isArray(backendLogs) && backendLogs.length > 0) {
-        const mappedLogs: CompletedRouteLog[] = backendLogs.map((l) => ({
-          id: l.id,
-          userId: l.userId,
-          userName: l.userId === authUser.id ? userName : `User #${l.userId}`,
-          userColor: PALETTE_30_COLORS[l.userId % PALETTE_30_COLORS.length],
-          userAvatar: l.userId === authUser.id && userAvatarUrl
-            ? userAvatarUrl
-            : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80',
-          destinationName: l.destinationName || 'Destination',
-          destinationCoords: { lat: 7.1475, lng: 3.3619 },
+        const currentUserId = authUser ? authUser.id : 1;
+        const mappedLogs: CompletedRouteLog[] = backendLogs.map((l) => {
+          const matchedUser = allUsers.find((u) => u.id === l.userId);
+          return {
+            id: l.id,
+            userId: l.userId,
+            userName: l.userId === currentUserId ? userFullName : (matchedUser ? matchedUser.name : `User #${l.userId}`),
+            userColor: PALETTE_30_COLORS[l.userId % PALETTE_30_COLORS.length],
+            userAvatar: l.userId === currentUserId && userAvatarUrl ? userAvatarUrl : (matchedUser?.avatar || ''),
+            destinationName: l.destinationName || 'Destination',
+            destinationCoords: { lat: 7.1475, lng: 3.3619 },
           startTime: new Date(l.completedAt).getTime() - (l.durationSeconds || 60) * 1000,
           endTime: new Date(l.completedAt).getTime(),
           durationSeconds: l.durationSeconds || 60,
@@ -712,27 +861,126 @@ export default function App() {
             hour: '2-digit',
             minute: '2-digit',
           }),
-        }));
-        setCompletedRoutes(mappedLogs);
-      } else {
+        };
+      });
         setCompletedRoutes((prev) => {
-          if (prev.length > 0) return prev;
-          return INITIAL_COMPLETED_ROUTES;
+          const ids = new Set(prev.map((p) => p.id));
+          const newEntries = mappedLogs.filter((m) => !ids.has(m.id));
+          return [...prev, ...newEntries];
         });
       }
-    }).catch(() => {
-      setCompletedRoutes((prev) => {
-        if (prev.length > 0) return prev;
-        return INITIAL_COMPLETED_ROUTES;
-      });
+    }).catch((err) => {
+      console.warn('API Warning [getAllRouteLogs]:', err);
     });
 
-    // Synchronize recorded places fallback if empty
-    setRecordedPlaces((prev) => {
-      if (prev.length > 0) return prev;
-      return INITIAL_RECORDED_PLACES;
+    // Fetch all users from ASP.NET Core backend
+    locationTrackerService.getAllUsers().then((backendUsers) => {
+      if (backendUsers && Array.isArray(backendUsers) && backendUsers.length > 0) {
+        const activeUsersList = backendUsers.filter((u) => !u.isHidden);
+        if (activeUsersList.length > 0) {
+          const currentId = authUser ? authUser.id : 1;
+          const mappedUsers: AppUser[] = activeUsersList.map((u, idx) => {
+            const isCurrent = u.id === currentId;
+            const resolvedAvatar = isCurrent && userAvatarUrl ? userAvatarUrl : formatProfileImageUrl(u.imageUrl);
+            const userLat = 7.1475 + (idx % 3 === 0 ? 0.005 : -0.005) * (Math.floor(idx / 3) + 1);
+            const userLng = 3.3619 + (idx % 2 === 0 ? 0.006 : -0.006) * (Math.floor(idx / 2) + 1);
+
+            return {
+              id: u.id,
+              name: u.name,
+              avatar: resolvedAvatar,
+              color: PALETTE_30_COLORS[idx % PALETTE_30_COLORS.length],
+              isCurrentUser: isCurrent,
+              currentPoint: isCurrent && currentPoint ? currentPoint : {
+                id: 1000 + u.id,
+                userId: u.id,
+                journeyId: 5000 + u.id,
+                routeId: 6000 + u.id,
+                lat: userLat,
+                lng: userLng,
+                accuracy: 8,
+                speed: 0,
+                speedMps: 0,
+                timestamp: Date.now(),
+                timeString: new Date().toLocaleTimeString(),
+              },
+              isTracking: true,
+              isStationary: true,
+              stationaryStartTime: null,
+              dwellDurationSeconds: 0,
+              originName: 'Starting Point',
+              originCoords: { lat: userLat, lng: userLng },
+              activeDestinationName: null,
+              activeDestinationCoords: null,
+              activeRoutePath: undefined,
+              isNavigating: false,
+              navigationStartTime: null,
+              speedKmH: 0,
+              mode: 'vehicle',
+            };
+          });
+          setAllUsers(mappedUsers);
+        }
+      }
+    }).catch((err) => {
+      console.warn('API Warning [getAllUsers in sync effect]:', err);
     });
   }, [authToken, authUser, userName, userAvatarUrl]);
+
+  // Initial mount: load real users from backend API
+  useEffect(() => {
+    locationTrackerService.getAllUsers().then((backendUsers) => {
+      if (backendUsers && Array.isArray(backendUsers) && backendUsers.length > 0) {
+        const activeUsersList = backendUsers.filter((u) => !u.isHidden);
+        if (activeUsersList.length > 0) {
+          const storedUser = getStoredAuthUser();
+          const storedImage = getStoredAuthImageUrl();
+          const currentId = storedUser?.id || 1;
+          const mappedUsers: AppUser[] = activeUsersList.map((u, idx) => {
+            const isCurrent = u.id === currentId;
+            const resolvedAvatar = isCurrent && storedImage ? formatProfileImageUrl(storedImage) : formatProfileImageUrl(u.imageUrl);
+            const userLat = 7.1475 + (idx % 3 === 0 ? 0.005 : -0.005) * (Math.floor(idx / 3) + 1);
+            const userLng = 3.3619 + (idx % 2 === 0 ? 0.006 : -0.006) * (Math.floor(idx / 2) + 1);
+
+            return {
+              id: u.id,
+              name: u.name,
+              avatar: resolvedAvatar,
+              color: PALETTE_30_COLORS[idx % PALETTE_30_COLORS.length],
+              isCurrentUser: isCurrent,
+              currentPoint: {
+                id: 1000 + u.id,
+                userId: u.id,
+                journeyId: 5000 + u.id,
+                routeId: 6000 + u.id,
+                lat: userLat,
+                lng: userLng,
+                accuracy: 8,
+                speed: 0,
+                speedMps: 0,
+                timestamp: Date.now(),
+                timeString: new Date().toLocaleTimeString(),
+              },
+              isTracking: true,
+              isStationary: true,
+              stationaryStartTime: null,
+              dwellDurationSeconds: 0,
+              originName: 'Starting Point',
+              originCoords: { lat: userLat, lng: userLng },
+              activeDestinationName: null,
+              activeDestinationCoords: null,
+              activeRoutePath: undefined,
+              isNavigating: false,
+              navigationStartTime: null,
+              speedKmH: 0,
+              mode: 'vehicle',
+            };
+          });
+          setAllUsers(mappedUsers);
+        }
+      }
+    }).catch(() => {});
+  }, []);
 
   /**
    * Add a custom marker and sync with ASP.NET Core backend
@@ -742,28 +990,34 @@ export default function App() {
     lng: number;
     name: string;
     description: string;
-    category: 'generic' | 'work' | 'cafe' | 'home' | 'landmark' | 'store';
+    category?: string;
+    color?: string;
   }) => {
     const activeUserId = authUser?.id || 1;
-    const activeUserColor = PALETTE_30_COLORS[0];
+    const activeUserColor = markerData.color || PALETTE_30_COLORS[0];
+    const markerCategory = markerData.category || 'generic';
 
     // POST /LocationTracker/CustomMarker/CreateCustomMarker
     const res = await locationTrackerService.createCustomMarker({
       userId: activeUserId,
       userColor: activeUserColor,
       name: markerData.name,
-      category: markerData.category,
+      category: markerCategory,
       latitude: markerData.lat,
       longitude: markerData.lng,
       isFromStayPoint: false,
     });
 
     const newMarker: CustomMarker = {
-      ...markerData,
+      lat: markerData.lat,
+      lng: markerData.lng,
+      name: markerData.name,
+      description: markerData.description,
+      category: markerCategory,
       id: res?.id || Date.now() + Math.floor(Math.random() * 1000),
       createdAt: Date.now(),
       userId: activeUserId,
-      userName: userName,
+      userName: userFullName,
       userColor: activeUserColor,
     };
     setCustomMarkers((prev) => [newMarker, ...prev]);
@@ -771,11 +1025,33 @@ export default function App() {
 
   /**
    * Edit an existing custom marker
+   * POST /LocationTracker/CustomMarker/UpdateCustomMarker
    */
-  const handleEditCustomMarker = (updatedMarker: CustomMarker) => {
+  const handleEditCustomMarker = async (updatedMarker: CustomMarker) => {
     setCustomMarkers((prev) =>
       prev.map((m) => (m.id === updatedMarker.id ? updatedMarker : m))
     );
+
+    try {
+      await locationTrackerService.updateCustomMarker({
+        id: updatedMarker.id,
+        userId: updatedMarker.userId || (authUser?.id || 1),
+        userColor: updatedMarker.userColor || PALETTE_30_COLORS[0],
+        name: updatedMarker.name,
+        category: updatedMarker.category,
+        latitude: updatedMarker.lat,
+        longitude: updatedMarker.lng,
+        isFromStayPoint: Boolean(updatedMarker.isFromStayPoint),
+      });
+      addNotification(
+        updatedMarker.userName || userFullName,
+        updatedMarker.userColor || PALETTE_30_COLORS[0],
+        'Marker Updated',
+        `"${updatedMarker.name}" details updated successfully`
+      );
+    } catch (err) {
+      console.warn('API Warning [updateCustomMarker]:', err);
+    }
   };
 
   /**
@@ -804,7 +1080,7 @@ export default function App() {
       category: 'landmark',
       createdAt: Date.now(),
       userId: activeUserId,
-      userName: userName,
+      userName: userFullName,
       userColor: activeUserColor,
       isFromStayPoint: true,
     };
@@ -848,34 +1124,82 @@ export default function App() {
     }
   };
 
-  // Initialize SignalR connection on app load for real-time hub updates
-  useEffect(() => {
-    initSignalRConnection();
-  }, []);
-
   /**
-   * Initiate turn-by-turn navigation along the selected route
+   * Start live navigation and create a continuous journey session on backend
+   * POST /LocationTracker/JourneySession/CreateJourneySession
    */
-  const handleStartNavigation = () => {
+  const handleStartNavigation = async () => {
     setIsNavigating(true);
     setNavigationActive(true);
-    setNavigationStartTime(Date.now());
-    if (activeDestinationName && activeDestinationCoords) {
-      sendStartRouteSignal(1, activeDestinationName, activeDestinationCoords);
+    const startMs = Date.now();
+    setNavigationStartTime(startMs);
+
+    const activeRoute = routes.find((r) => r.id === selectedRouteId) || routes[0];
+    const distanceMeters = activeRoute ? activeRoute.distanceMeters : 1200;
+    const durationSeconds = activeRoute ? activeRoute.durationSeconds : 180;
+    const speedKmH = distanceMeters && durationSeconds
+      ? Number((distanceMeters / 1000 / (durationSeconds / 3600)).toFixed(1))
+      : 25;
+    const destName = activeDestinationName || 'Destination';
+    const destCoords = activeDestinationCoords || (currentPoint ? { lat: currentPoint.lat, lng: currentPoint.lng } : { lat: 7.1475, lng: 3.3619 });
+    const currentUserId = authUser?.id || 1;
+
+    // Send SignalR Start Route signal
+    sendStartRouteSignal(currentUserId, destName, destCoords);
+
+    // Initial coordinate if available
+    const initialCoords = currentPoint
+      ? [
+          {
+            userId: currentUserId,
+            journeyId: 0,
+            routeId: 0, // Explicitly set to integer 0 as required by backend
+            sequenceIndex: 0,
+            latitude: currentPoint.lat,
+            longitude: currentPoint.lng,
+            altitude: Math.round(currentPoint.altitude || 0),
+            accuracyMeters: Math.round(currentPoint.accuracy || 0),
+            headingDegrees: Math.round(currentPoint.heading || 0),
+            speedKmH: Math.round(currentPoint.speed || 0),
+          },
+        ]
+      : [];
+
+    try {
+      const newSession = await locationTrackerService.createJourneySession({
+        userId: currentUserId,
+        startTime: new Date(startMs).toISOString(),
+        endTime: new Date(startMs).toISOString(),
+        totalDistanceMeters: distanceMeters,
+        totalDurationSeconds: durationSeconds,
+        averageSpeedKmH: speedKmH,
+        status: 1, // 1 = Active
+        coordinates: initialCoords,
+      });
+
+      if (newSession && newSession.id) {
+        setActiveJourneySessionId(newSession.id);
+        activeJourneyIdRef.current = newSession.id;
+        safeSaveStorage(STORAGE_KEYS.ACTIVE_JOURNEY_ID, newSession.id);
+      }
+    } catch (err) {
+      console.warn('API Warning [createJourneySession]:', err);
     }
+
+    addNotification(userFullName, PALETTE_30_COLORS[0], 'Navigation Started', `Navigating to ${destName}...`);
   };
 
-  // Helper to dismiss notification with slide-out animation
+  // Helper to dismiss notification
   const dismissNotification = useCallback((id: number) => {
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, isExiting: true } : n))
-    );
-    setTimeout(() => {
-      setNotifications((prev) => prev.filter((n) => n.id !== id));
-    }, 380);
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
   }, []);
 
-  // Helper to trigger toast notification
+  // Helper to clear all notifications
+  const handleClearAllNotifications = useCallback(() => {
+    setNotifications([]);
+  }, []);
+
+  // Helper to trigger toast notification (10s auto-dismiss and stack hover managed by NotificationStack)
   const addNotification = useCallback((uName: string, uColor: string, title: string, message: string) => {
     const notifId = Date.now() + Math.floor(Math.random() * 1000);
     const isCancelled = title.toLowerCase().includes('cancel');
@@ -889,13 +1213,332 @@ export default function App() {
       isCancelledType: isCancelled,
       isExiting: false,
     };
-    setNotifications((prev) => [newNotif, ...prev.slice(0, 4)]);
+    // Put newest at front, keep up to 8 notifications in buffer
+    setNotifications((prev) => [newNotif, ...prev.slice(0, 7)]);
+  }, []);
 
-    // Auto-dismiss notification after 6 seconds
-    setTimeout(() => {
-      dismissNotification(notifId);
-    }, 6000);
-  }, [dismissNotification]);
+  // Initialize SignalR connection and listen for real-time notifications via _realTimeNotificationService.NotifyAll
+  useEffect(() => {
+    initSignalRConnection();
+
+    // 1. Marker Added: await _realTimeNotificationService.NotifyAll("Marker Added", newCustomMarker)
+    const unsubMarkerAdded = onMarkerAdded((newCustomMarker) => {
+      if (!newCustomMarker) return;
+      const markerId = Number(newCustomMarker.id ?? newCustomMarker.Id ?? Date.now());
+      const markerUserId = Number(newCustomMarker.userId ?? newCustomMarker.UserId ?? 1);
+      const matchedUser = allUsers.find((u) => u.id === markerUserId);
+      const markerColor = newCustomMarker.userColor ?? newCustomMarker.UserColor ?? (matchedUser ? matchedUser.color : PALETTE_30_COLORS[markerUserId % PALETTE_30_COLORS.length]);
+      const markerUserName = newCustomMarker.userName ?? newCustomMarker.UserName ?? (matchedUser ? matchedUser.name : `User #${markerUserId}`);
+
+      const marker: CustomMarker = {
+        id: markerId,
+        userId: markerUserId,
+        userName: markerUserName,
+        userColor: markerColor,
+        lat: Number(newCustomMarker.latitude ?? newCustomMarker.Latitude ?? newCustomMarker.lat ?? newCustomMarker.Lat ?? 0),
+        lng: Number(newCustomMarker.longitude ?? newCustomMarker.Longitude ?? newCustomMarker.lng ?? newCustomMarker.Lng ?? 0),
+        name: String(newCustomMarker.name ?? newCustomMarker.Name ?? 'New Saved Marker'),
+        description: String(newCustomMarker.description ?? newCustomMarker.Description ?? `Category: ${newCustomMarker.category ?? newCustomMarker.Category ?? 'generic'}`),
+        category: (newCustomMarker.category ?? newCustomMarker.Category ?? 'generic') as any,
+        createdAt: newCustomMarker.createdAt || newCustomMarker.CreatedAt ? new Date(newCustomMarker.createdAt || newCustomMarker.CreatedAt).getTime() : Date.now(),
+        isFromStayPoint: Boolean(newCustomMarker.isFromStayPoint ?? newCustomMarker.IsFromStayPoint ?? false),
+      };
+
+      setCustomMarkers((prev) => {
+        if (prev.some((m) => m.id === marker.id)) {
+          return prev.map((m) => (m.id === marker.id ? marker : m));
+        }
+        return [marker, ...prev];
+      });
+
+      addNotification(marker.userName, marker.userColor || '#3B82F6', 'Marker Added', `"${marker.name}" added to map in real-time`);
+    });
+
+    // 2. Marker Updated: await _realTimeNotificationService.NotifyAll("Marker Updated", existingCustomMarker)
+    const unsubMarkerUpdated = onMarkerUpdated((existingCustomMarker) => {
+      if (!existingCustomMarker) return;
+      const markerId = Number(existingCustomMarker.id ?? existingCustomMarker.Id);
+      if (!markerId) return;
+
+      setCustomMarkers((prev) =>
+        prev.map((m) => {
+          if (m.id !== markerId) return m;
+          const updatedLat = Number(existingCustomMarker.latitude ?? existingCustomMarker.Latitude ?? existingCustomMarker.lat ?? existingCustomMarker.Lat ?? m.lat);
+          const updatedLng = Number(existingCustomMarker.longitude ?? existingCustomMarker.Longitude ?? existingCustomMarker.lng ?? existingCustomMarker.Lng ?? m.lng);
+          const updatedName = String(existingCustomMarker.name ?? existingCustomMarker.Name ?? m.name);
+          const updatedCategory = (existingCustomMarker.category ?? existingCustomMarker.Category ?? m.category) as any;
+          const updatedDescription = String(existingCustomMarker.description ?? existingCustomMarker.Description ?? m.description);
+          return {
+            ...m,
+            lat: updatedLat,
+            lng: updatedLng,
+            name: updatedName,
+            category: updatedCategory,
+            description: updatedDescription,
+          };
+        })
+      );
+
+      const markerName = String(existingCustomMarker.name ?? existingCustomMarker.Name ?? 'Marker');
+      addNotification('Map', '#3B82F6', 'Marker Updated', `"${markerName}" has been updated`);
+    });
+
+    // 3. Marker Deleted: await _realTimeNotificationService.NotifyAll("Marker Deleted", existingCustomMarker)
+    const unsubMarkerDeleted = onMarkerDeleted((existingCustomMarker) => {
+      if (!existingCustomMarker) return;
+      const markerId = typeof existingCustomMarker === 'number'
+        ? existingCustomMarker
+        : Number(existingCustomMarker.id ?? existingCustomMarker.Id ?? existingCustomMarker.customMarkerId ?? existingCustomMarker.CustomMarkerId);
+      if (!markerId) return;
+
+      setCustomMarkers((prev) => {
+        const found = prev.find((m) => m.id === markerId);
+        if (found) {
+          addNotification(found.userName, '#EF4444', 'Marker Deleted', `"${found.name}" was removed from the map`);
+        }
+        return prev.filter((m) => m.id !== markerId);
+      });
+    });
+
+    // 4. Journey Session Started: await _realtimeNotificationService.NotifyAll("Journey Session Started", newJourneySession)
+    const unsubSessionStarted = onJourneySessionStarted((newJourneySession) => {
+      if (!newJourneySession) return;
+      const sessId = Number(newJourneySession.id ?? newJourneySession.Id ?? Date.now());
+      const sessUserId = Number(newJourneySession.userId ?? newJourneySession.UserId ?? 1);
+      const matchedUser = allUsers.find((u) => u.id === sessUserId);
+      const isMe = sessUserId === (authUser?.id || 1);
+      const userColor = matchedUser ? matchedUser.color : PALETTE_30_COLORS[sessUserId % PALETTE_30_COLORS.length];
+      const uName = matchedUser ? matchedUser.name : (isMe ? userName : `User #${sessUserId}`);
+      const avatar = matchedUser ? matchedUser.avatar : (isMe ? (userAvatarUrl || '') : '');
+      const startTimeMs = newJourneySession.startTime || newJourneySession.StartTime
+        ? new Date(newJourneySession.startTime || newJourneySession.StartTime).getTime()
+        : Date.now();
+      const coords = newJourneySession.coordinates || newJourneySession.Coordinates || [];
+      const destCoords = coords.length > 0
+        ? {
+            lat: Number(coords[coords.length - 1].latitude ?? coords[coords.length - 1].Latitude ?? 7.1475),
+            lng: Number(coords[coords.length - 1].longitude ?? coords[coords.length - 1].Longitude ?? 3.3619),
+          }
+        : { lat: 7.1475, lng: 3.3619 };
+      const destName = String(newJourneySession.destinationName ?? newJourneySession.DestinationName ?? `Journey Session #${sessId}`);
+
+      const sessionLog: CompletedRouteLog = {
+        id: sessId,
+        userId: sessUserId,
+        userName: uName,
+        userColor: userColor,
+        userAvatar: avatar,
+        destinationName: destName,
+        destinationCoords: destCoords,
+        startTime: startTimeMs,
+        endTime: startTimeMs,
+        durationSeconds: Number(newJourneySession.totalDurationSeconds ?? newJourneySession.TotalDurationSeconds ?? 0),
+        durationFormatted: '0 sec',
+        distanceMeters: Number(newJourneySession.totalDistanceMeters ?? newJourneySession.TotalDistanceMeters ?? 0),
+        averageSpeedKmH: Number(newJourneySession.averageSpeedKmH ?? newJourneySession.AverageSpeedKmH ?? 0),
+        travelMode: 'DRIVING',
+        status: 'active',
+        completedAtTimeString: new Date(startTimeMs).toLocaleString('en-US', {
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+      };
+
+      setCompletedRoutes((prev) => {
+        if (prev.some((s) => s.id === sessionLog.id)) {
+          return prev.map((s) => (s.id === sessionLog.id ? sessionLog : s));
+        }
+        return [sessionLog, ...prev];
+      });
+
+      if (!isMe) {
+        setAllUsers((prevUsers) =>
+          prevUsers.map((u) =>
+            u.id === sessUserId
+              ? {
+                  ...u,
+                  isNavigating: true,
+                  activeDestinationName: destName,
+                  activeDestinationCoords: destCoords,
+                  navigationStartTime: startTimeMs,
+                }
+              : u
+          )
+        );
+      }
+
+      addNotification(uName, userColor, 'Journey Session Started', `${uName} started a new journey session`);
+    });
+
+    // 5. Journey Session Updated: await _realtimeNotificationService.NotifyAll("Journey Session Updated", existingJourneySession)
+    const unsubSessionUpdated = onJourneySessionUpdated((existingJourneySession) => {
+      if (!existingJourneySession) return;
+      const sessId = Number(existingJourneySession.id ?? existingJourneySession.Id);
+      if (!sessId) return;
+      const sessUserId = Number(existingJourneySession.userId ?? existingJourneySession.UserId ?? 1);
+      const matchedUser = allUsers.find((u) => u.id === sessUserId);
+      const isMe = sessUserId === (authUser?.id || 1);
+      const userColor = matchedUser ? matchedUser.color : PALETTE_30_COLORS[sessUserId % PALETTE_30_COLORS.length];
+      const uName = matchedUser ? matchedUser.name : (isMe ? userName : `User #${sessUserId}`);
+      const statusNum = Number(existingJourneySession.status ?? existingJourneySession.Status ?? 1);
+      const isCompleted = statusNum === 2;
+      const isCancelled = statusNum === 3;
+      const durationSec = Number(existingJourneySession.totalDurationSeconds ?? existingJourneySession.TotalDurationSeconds ?? 0);
+      const distanceM = Number(existingJourneySession.totalDistanceMeters ?? existingJourneySession.TotalDistanceMeters ?? 0);
+      const speedKmH = Number(existingJourneySession.averageSpeedKmH ?? existingJourneySession.AverageSpeedKmH ?? 0);
+
+      setCompletedRoutes((prev) =>
+        prev.map((s) => {
+          if (s.id !== sessId) return s;
+          return {
+            ...s,
+            durationSeconds: durationSec || s.durationSeconds,
+            durationFormatted: formatDuration(durationSec || s.durationSeconds),
+            distanceMeters: distanceM || s.distanceMeters,
+            averageSpeedKmH: speedKmH || s.averageSpeedKmH,
+            status: isCompleted ? 'completed' : isCancelled ? 'cancelled' : s.status,
+          };
+        })
+      );
+
+      if (isCompleted && !isMe) {
+        setAllUsers((prevUsers) =>
+          prevUsers.map((u) =>
+            u.id === sessUserId
+              ? { ...u, isNavigating: false, activeDestinationName: null, activeDestinationCoords: null }
+              : u
+          )
+        );
+      }
+
+      addNotification(uName, userColor, 'Journey Session Updated', `${uName}'s journey session #${sessId} was updated`);
+    });
+
+    // 6. Journey Session Cancelled: await _realtimeNotificationService.NotifyAll("Journey Session Cancelled", existingJourneySession)
+    const unsubSessionCancelled = onJourneySessionCancelled((existingJourneySession) => {
+      if (!existingJourneySession) return;
+      const sessId = Number(existingJourneySession.id ?? existingJourneySession.Id);
+      if (!sessId) return;
+      const sessUserId = Number(existingJourneySession.userId ?? existingJourneySession.UserId ?? 1);
+      const matchedUser = allUsers.find((u) => u.id === sessUserId);
+      const isMe = sessUserId === (authUser?.id || 1);
+      const uName = matchedUser ? matchedUser.name : (isMe ? userName : `User #${sessUserId}`);
+
+      setCompletedRoutes((prev) =>
+        prev.map((s) => (s.id === sessId ? { ...s, status: 'cancelled' } : s))
+      );
+
+      if (!isMe) {
+        setAllUsers((prevUsers) =>
+          prevUsers.map((u) =>
+            u.id === sessUserId
+              ? { ...u, isNavigating: false, activeDestinationName: null, activeDestinationCoords: null }
+              : u
+          )
+        );
+      }
+
+      addNotification(uName, '#EF4444', 'Journey Session Cancelled', `${uName} cancelled journey session #${sessId}`);
+    });
+
+    // 7. Route Log Added: await _realTimeNotificationService.NotifyAll("Route Log Added", newRouteLog)
+    const unsubRouteLogAdded = onRouteLogAdded((newRouteLog) => {
+      if (!newRouteLog) return;
+      const logId = Number(newRouteLog.id ?? newRouteLog.Id ?? Date.now());
+      const logUserId = Number(newRouteLog.userId ?? newRouteLog.UserId ?? 1);
+      const matchedUser = allUsers.find((u) => u.id === logUserId);
+      const isMe = logUserId === (authUser?.id || 1);
+      const userColor = matchedUser ? matchedUser.color : PALETTE_30_COLORS[logUserId % PALETTE_30_COLORS.length];
+      const uName = matchedUser ? matchedUser.name : (isMe ? userName : `User #${logUserId}`);
+      const avatar = matchedUser ? matchedUser.avatar : (isMe ? (userAvatarUrl || '') : '');
+      const rawDuration = Number(newRouteLog.durationSeconds ?? newRouteLog.DurationSeconds ?? 60);
+      const distMeters = Number(newRouteLog.totalDistanceMeters ?? newRouteLog.TotalDistanceMeters ?? 1000);
+      const completedDate = newRouteLog.completedAt || newRouteLog.CompletedAt
+        ? new Date(newRouteLog.completedAt || newRouteLog.CompletedAt)
+        : new Date();
+      const endTimeMs = completedDate.getTime();
+      const startTimeMs = endTimeMs - rawDuration * 1000;
+      const avgSpeed = distMeters > 0 && rawDuration > 0
+        ? Number((distMeters / 1000 / (rawDuration / 3600)).toFixed(1))
+        : 20;
+      const travelModeNum = Number(newRouteLog.travelMode ?? newRouteLog.TravelMode ?? 1);
+      const modeStr: 'WALKING' | 'DRIVING' | 'FLIGHT' = travelModeNum === 2 ? 'WALKING' : travelModeNum === 3 ? 'FLIGHT' : 'DRIVING';
+      const destName = String(newRouteLog.destinationName ?? newRouteLog.DestinationName ?? 'Destination');
+
+      const logItem: CompletedRouteLog = {
+        id: logId,
+        userId: logUserId,
+        userName: uName,
+        userColor: userColor,
+        userAvatar: avatar,
+        destinationName: destName,
+        destinationCoords: { lat: 7.1475, lng: 3.3619 },
+        startTime: startTimeMs,
+        endTime: endTimeMs,
+        durationSeconds: rawDuration,
+        durationFormatted: formatDuration(rawDuration),
+        distanceMeters: distMeters,
+        averageSpeedKmH: avgSpeed,
+        travelMode: modeStr,
+        status: 'completed',
+        completedAtTimeString: completedDate.toLocaleString('en-US', {
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+      };
+
+      setCompletedRoutes((prev) => {
+        if (prev.some((r) => r.id === logItem.id)) {
+          return prev.map((r) => (r.id === logItem.id ? logItem : r));
+        }
+        return [logItem, ...prev];
+      });
+
+      addNotification(uName, userColor, 'Route Log Added', `Route log to ${destName} was recorded`);
+    });
+
+    // 8. Route Log Updated: await _realTimeNotificationService.NotifyAll("Route Log Updated", existingRouteLog)
+    const unsubRouteLogUpdated = onRouteLogUpdated((existingRouteLog) => {
+      if (!existingRouteLog) return;
+      const logId = Number(existingRouteLog.id ?? existingRouteLog.Id);
+      if (!logId) return;
+      const destName = String(existingRouteLog.destinationName ?? existingRouteLog.DestinationName ?? 'Destination');
+      const distMeters = Number(existingRouteLog.totalDistanceMeters ?? existingRouteLog.TotalDistanceMeters ?? 0);
+      const durationSec = Number(existingRouteLog.durationSeconds ?? existingRouteLog.DurationSeconds ?? 0);
+
+      setCompletedRoutes((prev) =>
+        prev.map((r) => {
+          if (r.id !== logId) return r;
+          return {
+            ...r,
+            destinationName: destName || r.destinationName,
+            distanceMeters: distMeters || r.distanceMeters,
+            durationSeconds: durationSec || r.durationSeconds,
+            durationFormatted: formatDuration(durationSec || r.durationSeconds),
+          };
+        })
+      );
+
+      addNotification('Route Log', '#3B82F6', 'Route Log Updated', `Route log #${logId} to ${destName} was updated`);
+    });
+
+    return () => {
+      unsubMarkerAdded();
+      unsubMarkerUpdated();
+      unsubMarkerDeleted();
+      unsubSessionStarted();
+      unsubSessionUpdated();
+      unsubSessionCancelled();
+      unsubRouteLogAdded();
+      unsubRouteLogUpdated();
+    };
+  }, [allUsers, authUser, userName, userAvatarUrl, addNotification]);
 
   /**
    * Complete route and record history log
@@ -908,13 +1551,38 @@ export default function App() {
     const distanceMeters = activeRoute ? activeRoute.distanceMeters : 1200;
     const speedKmH = Number((distanceMeters / 1000 / (durationSeconds / 3600)).toFixed(1)) || 25;
     const destName = activeDestinationName || 'Selected Destination';
+    const currentUserId = authUser?.id || 1;
+
+    // POST /LocationTracker/JourneySession/UpdateJourneySession
+    if (activeJourneySessionId) {
+      locationTrackerService.updateJourneySession({
+        id: activeJourneySessionId,
+        userId: currentUserId,
+        startTime: new Date(navigationStartTime || Date.now() - durationSeconds * 1000).toISOString(),
+        endTime: new Date().toISOString(),
+        totalDistanceMeters: distanceMeters,
+        totalDurationSeconds: durationSeconds,
+        averageSpeedKmH: speedKmH,
+        status: 2, // 2 = Completed
+      }).catch((err) => {
+        console.warn('API Warning [updateJourneySession]:', err);
+      });
+      setActiveJourneySessionId(null);
+    }
+
+    // Flush any pending coordinates via CreateBatchCoordinates
+    if (coordinateBufferRef.current.length > 0) {
+      const finalBatch = [...coordinateBufferRef.current];
+      coordinateBufferRef.current = [];
+      locationTrackerService.createBatchCoordinates(finalBatch);
+    }
 
     const newCompletedLog: CompletedRouteLog = {
       id: Date.now() + Math.floor(Math.random() * 1000),
-      userId: 1,
-      userName: userName,
+      userId: currentUserId,
+      userName: userFullName,
       userColor: PALETTE_30_COLORS[0],
-      userAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80',
+      userAvatar: userAvatarUrl || '',
       destinationName: destName,
       destinationCoords: activeDestinationCoords || { lat: currentPoint?.lat || 7.1475, lng: currentPoint?.lng || 3.3619 },
       startTime: navigationStartTime || Date.now() - durationSeconds * 1000,
@@ -944,8 +1612,8 @@ export default function App() {
     setActiveDestinationCoords(null);
 
     // Auto Arrival notification
-    addNotification(userName, PALETTE_30_COLORS[0], 'Route Completed!', `You have automatically arrived at ${destName}!`);
-  }, [routes, selectedRouteId, navigationStartTime, activeDestinationName, activeDestinationCoords, currentPoint, addNotification]);
+    addNotification(userFullName, PALETTE_30_COLORS[0], 'Route Completed!', `You have automatically arrived at ${destName}!`);
+  }, [routes, selectedRouteId, navigationStartTime, activeDestinationName, activeDestinationCoords, currentPoint, addNotification, activeJourneySessionId, authUser, userName, userAvatarUrl]);
 
   /**
    * Clear active route and cancel navigation (saves cancelled route ONLY if start navigation was clicked)
@@ -960,16 +1628,25 @@ export default function App() {
       const distanceMeters = activeRoute ? activeRoute.distanceMeters : 1000;
       const speedKmH = Number((distanceMeters / 1000 / (durationSeconds / 3600)).toFixed(1)) || 20;
       const destName = activeDestinationName || 'Selected Destination';
+      const currentUserId = authUser?.id || 1;
+
+      // GET /LocationTracker/JourneySession/CancelJourneySession?journeyId={id}
+      if (activeJourneySessionId) {
+        locationTrackerService.cancelJourneySession(activeJourneySessionId).catch((err) => {
+          console.warn('API Warning [cancelJourneySession]:', err);
+        });
+        setActiveJourneySessionId(null);
+      }
 
       // Send SignalR cancel route event
-      sendCancelRouteSignal(1, destName, durationSeconds);
+      sendCancelRouteSignal(currentUserId, destName, durationSeconds);
 
       const cancelledLog: CompletedRouteLog = {
         id: Date.now() + Math.floor(Math.random() * 1000),
-        userId: 1,
-        userName: userName,
+        userId: currentUserId,
+        userName: userFullName,
         userColor: PALETTE_30_COLORS[0],
-        userAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80',
+        userAvatar: userAvatarUrl || '',
         destinationName: destName,
         destinationCoords: activeDestinationCoords || { lat: currentPoint?.lat || 7.1475, lng: currentPoint?.lng || 3.3619 },
         startTime: navigationStartTime || Date.now() - durationSeconds * 1000,
@@ -990,156 +1667,19 @@ export default function App() {
       };
 
       setCompletedRoutes((prev) => [cancelledLog, ...prev]);
-      addNotification(userName, PALETTE_30_COLORS[0], 'Route Cancelled', `Route to ${destName} has been cancelled and saved.`);
+      addNotification(userFullName, PALETTE_30_COLORS[0], 'Route Cancelled', `Route to ${destName} has been cancelled and saved.`);
     }
 
     setIsNavigating(false);
     setNavigationActive(false);
     setNavigationStartTime(null);
+    setActiveJourneySessionId(null);
+    coordinateBufferRef.current = [];
     setRoutes([]);
     setSelectedRouteId(null);
     setActiveDestinationName(null);
     setActiveDestinationCoords(null);
   };
-
-  // Auto-upgrade initial demo user routes to real Google Maps road network paths as soon as API is available
-  useEffect(() => {
-    let isMounted = true;
-    const timeout = setTimeout(() => {
-      allUsers.forEach((usr) => {
-        if (!usr.isCurrentUser && usr.id !== 1 && usr.activeDestinationCoords && usr.currentPoint) {
-          fetchRealRoadPath(usr.currentPoint, usr.activeDestinationCoords)
-            .then((realPath) => {
-              if (isMounted && realPath && realPath.length > 3) {
-                setAllUsers((currentList) =>
-                  currentList.map((u) => (u.id === usr.id ? { ...u, activeRoutePath: realPath } : u))
-                );
-              }
-            })
-            .catch((err) => {
-              console.warn('Initial road path fetch warning:', err);
-            });
-        }
-      });
-    }, 1200);
-
-    return () => {
-      isMounted = false;
-      clearTimeout(timeout);
-    };
-  }, []);
-
-  // Real-time animation tick for demo users following street road paths
-  useEffect(() => {
-    const locValues = Object.values(ABEOKUTA_LOCATIONS);
-    const interval = setInterval(() => {
-      setAllUsers((prevUsers) =>
-        prevUsers.map((usr) => {
-          if (usr.isCurrentUser || usr.id === 1) return usr; // Primary user moves via real GPS
-          if (!usr.currentPoint || typeof usr.currentPoint.lat !== 'number' || isNaN(usr.currentPoint.lat)) {
-            return usr;
-          }
-
-          const destCoords = usr.activeDestinationCoords;
-          if (usr.isNavigating && destCoords && typeof destCoords.lat === 'number') {
-            let routePath = usr.activeRoutePath;
-            if (!routePath || routePath.length === 0) {
-              routePath = generateAbeokutaRoadPath(usr.currentPoint, destCoords);
-            }
-
-            // Find target waypoint along the road path
-            const targetIdx = routePath.findIndex(
-              (p) => p && typeof p.lat === 'number' && Math.hypot(p.lat - usr.currentPoint.lat, p.lng - usr.currentPoint.lng) > 0.00012
-            );
-
-            if (targetIdx === -1) {
-              // Reached final destination along the road! Pick next Abeokuta landmark & generate new road path
-              const targetMarkerName = usr.activeDestinationName || 'destination';
-              const nextLoc = locValues[Math.floor(Math.random() * locValues.length)];
-              const newRoadPath = generateAbeokutaRoadPath(destCoords, { lat: nextLoc.lat, lng: nextLoc.lng });
-
-              addNotification(
-                usr.name,
-                usr.color,
-                'Marker Arrival',
-                `${usr.name} reached ${targetMarkerName} & en route to ${nextLoc.name}!`
-              );
-
-              // Asynchronously upgrade to exact Google Maps street polyline
-              fetchRealRoadPath(destCoords, { lat: nextLoc.lat, lng: nextLoc.lng })
-                .then((realPath) => {
-                  if (realPath && realPath.length > 3) {
-                    setAllUsers((prev) =>
-                      prev.map((u) => (u.id === usr.id ? { ...u, activeRoutePath: realPath } : u))
-                    );
-                  }
-                })
-                .catch((err) => console.warn('Road path upgrade warning:', err));
-
-              return {
-                ...usr,
-                isNavigating: true,
-                isStationary: false,
-                mode: 'vehicle',
-                speedKmH: 22.0 + Math.random() * 15,
-                originName: targetMarkerName,
-                originCoords: destCoords,
-                activeDestinationName: nextLoc.name,
-                activeDestinationCoords: { lat: nextLoc.lat, lng: nextLoc.lng },
-                activeRoutePath: newRoadPath,
-              };
-            }
-
-            // Step along the road segment towards the target waypoint
-            const targetPoint = routePath[targetIdx];
-            if (!targetPoint || typeof targetPoint.lat !== 'number' || typeof targetPoint.lng !== 'number') {
-              return usr;
-            }
-
-            const dLat = targetPoint.lat - usr.currentPoint.lat;
-            const dLng = targetPoint.lng - usr.currentPoint.lng;
-            const dist = Math.hypot(dLat, dLng);
-            const stepSize = 0.00022; // Smooth travel speed along road line
-            const ratio = dist > 0 ? Math.min(1, stepSize / dist) : 1;
-
-            const nextLat = usr.currentPoint.lat + dLat * ratio;
-            const nextLng = usr.currentPoint.lng + dLng * ratio;
-
-            return {
-              ...usr,
-              isNavigating: true,
-              mode: 'vehicle',
-              speedKmH: usr.speedKmH || 25.0,
-              activeRoutePath: routePath,
-              currentPoint: {
-                ...usr.currentPoint,
-                lat: nextLat,
-                lng: nextLng,
-                speed: usr.speedKmH || 25.0,
-                timestamp: Date.now(),
-              },
-            };
-          } else {
-            // Assign next target in Abeokuta to keep in continuous vehicle motion along roads
-            const nextLoc = locValues[Math.floor(Math.random() * locValues.length)];
-            const newRoadPath = generateAbeokutaRoadPath(usr.currentPoint, { lat: nextLoc.lat, lng: nextLoc.lng });
-            return {
-              ...usr,
-              isNavigating: true,
-              isStationary: false,
-              mode: 'vehicle',
-              speedKmH: 24.0,
-              activeDestinationName: nextLoc.name,
-              activeDestinationCoords: { lat: nextLoc.lat, lng: nextLoc.lng },
-              activeRoutePath: newRoadPath,
-            };
-          }
-        })
-      );
-    }, 1100);
-
-    return () => clearInterval(interval);
-  }, [addNotification]);
 
   /**
    * Fast-forward dwell timer to >= 90s to easily test constant location place recording
@@ -1212,9 +1752,9 @@ export default function App() {
       <HeaderBar
         theme={theme}
         userName={userName}
+        userFullName={userFullName}
         userAvatarUrl={userAvatarUrl || undefined}
         isLoggedIn={!!authToken && !!authUser}
-        onResetTrail={handleResetTrail}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         onOpenLoginOverlay={() => setIsLoginOverlayOpen(true)}
         onLogoutClick={() => setIsLogoutModalOpen(true)}
@@ -1276,90 +1816,13 @@ export default function App() {
         </button>
       </div>
 
-      {/* Top Floating Notifications (Completion / Arrival) */}
-      {notifications.filter((n) => !n.isCancelledType).length > 0 && (
-        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 max-w-md w-full px-4 pointer-events-none">
-          {notifications
-            .filter((n) => !n.isCancelledType)
-            .map((notif) => (
-              <div
-                key={notif.id}
-                className={`p-3 rounded-2xl shadow-xl border backdrop-blur-md flex items-start gap-3 pointer-events-auto transition-all animate-in fade-in slide-in-from-top-2 ${
-                  isDark
-                    ? 'bg-zinc-900/95 border-emerald-500/40 text-zinc-100 shadow-emerald-950/40'
-                    : 'bg-white/95 border-emerald-500/30 text-zinc-900 shadow-emerald-500/10'
-                }`}
-              >
-                <div
-                  className="w-8 h-8 rounded-xl flex items-center justify-center text-white font-bold text-xs shrink-0 shadow-sm"
-                  style={{ backgroundColor: notif.userColor }}
-                >
-                  <Bell className="w-4 h-4 text-white" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-emerald-500">{notif.title}</span>
-                    <span className="text-[10px] text-zinc-400">Just now</span>
-                  </div>
-                  <p className="text-xs font-semibold mt-0.5 text-zinc-800 dark:text-zinc-200 leading-snug">
-                    {notif.message}
-                  </p>
-                </div>
-                <button
-                  onClick={() => dismissNotification(notif.id)}
-                  className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 p-1 cursor-pointer"
-                >
-                  &times;
-                </button>
-              </div>
-            ))}
-        </div>
-      )}
-
-      {/* Bottom Right Floating Route Cancelled Notification Toasts (With Slide-In & Slide-Out) */}
-      {notifications.filter((n) => n.isCancelledType).length > 0 && (
-        <div
-          id="route-cancelled-toast-container"
-          className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2.5 max-w-sm w-[calc(100%-3rem)] pointer-events-none select-none"
-        >
-          {notifications
-            .filter((n) => n.isCancelledType)
-            .map((notif) => (
-              <div
-                key={notif.id}
-                className={`p-4 rounded-2xl shadow-2xl border backdrop-blur-md flex items-start gap-3.5 pointer-events-auto w-full transition-all ${
-                  notif.isExiting ? 'toast-slide-out' : 'toast-slide-in'
-                } ${
-                  isDark
-                    ? 'bg-zinc-900/95 border-rose-500/50 text-zinc-100 shadow-rose-950/50'
-                    : 'bg-white/95 border-rose-500/40 text-zinc-900 shadow-rose-500/20'
-                }`}
-              >
-                <div className="w-9 h-9 rounded-xl bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-500 font-bold shrink-0 shadow-sm">
-                  <AlertCircle className="w-5 h-5 text-rose-500 animate-pulse" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-extrabold uppercase tracking-wider text-rose-500">
-                      {notif.title}
-                    </span>
-                    <span className="text-[10px] font-semibold text-zinc-400">Just now</span>
-                  </div>
-                  <p className="text-xs font-semibold mt-1 text-zinc-800 dark:text-zinc-200 leading-snug">
-                    {notif.message}
-                  </p>
-                </div>
-                <button
-                  onClick={() => dismissNotification(notif.id)}
-                  className="p-1 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer shrink-0"
-                  title="Dismiss"
-                >
-                  &times;
-                </button>
-              </div>
-            ))}
-        </div>
-      )}
+      {/* Bottom Right Floating Stacked Notification Banners (Stacks in front, opens on hover, disappears after 10s) */}
+      <NotificationStack
+        notifications={notifications}
+        onDismiss={dismissNotification}
+        onClearAll={handleClearAllNotifications}
+        isDark={isDark}
+      />
 
       {/* Main Core Layout: Map & Movement Logs Sidebar */}
       <main className="flex-1 flex flex-col md:flex-row w-full h-full overflow-hidden relative">
@@ -1382,13 +1845,16 @@ export default function App() {
             stationaryState={stationaryState}
             isTracking={isTracking}
             theme={theme}
-            userName={userName}
+            userName={userFullName || userName}
+            userAvatarUrl={userAvatarUrl || undefined}
             activeDestinationName={activeDestinationName}
             isNavigating={isNavigating}
             allUsers={allUsers}
             selectedUserIdFilter={selectedUserIdFilter}
             contentTypeFilter={contentTypeFilter}
             timeRangeFilter={timeRangeFilter}
+            pointsHistory={pointsHistory}
+            completedRoutes={completedRoutes}
             isSidebarCollapsed={isSidebarCollapsed}
             onSelectUserFilter={(userId) => setSelectedUserIdFilter(userId)}
             onSelectContentTypeFilter={(type) => setContentTypeFilter(type)}
@@ -1443,6 +1909,7 @@ export default function App() {
               currentPoint={currentPoint}
               stats={stats}
               theme={theme}
+              userAvatarUrl={userAvatarUrl}
               isNavigating={isNavigating}
               allUsers={allUsers}
               selectedUserIdFilter={selectedUserIdFilter}

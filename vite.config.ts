@@ -17,6 +17,25 @@ export default defineConfig(() => {
       strictPort: true,
       hmr: process.env.DISABLE_HMR !== 'true',
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      proxy: {
+        '/LocationTracker': {
+          target: 'https://kv5zhpcr-7044.uks1.devtunnels.ms',
+          changeOrigin: true,
+          secure: false,
+          ws: true,
+          headers: {
+            'X-Tunnel-Skip-Anti-Phishing-Page': 'true',
+          },
+        },
+        '/storage': {
+          target: 'https://kv5zhpcr-7044.uks1.devtunnels.ms',
+          changeOrigin: true,
+          secure: false,
+          headers: {
+            'X-Tunnel-Skip-Anti-Phishing-Page': 'true',
+          },
+        },
+      },
     },
     preview: {
       port: 3000,

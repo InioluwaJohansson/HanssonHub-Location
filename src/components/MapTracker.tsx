@@ -9,9 +9,11 @@ import {
   RouteOption,
   AppTheme,
   AppUser,
+  CompletedRouteLog,
+  ContentTypeFilter,
+  TimeRangeFilter,
 } from '../types';
 import { MapOverlays } from './MapOverlays';
-import { StationaryNewsCard } from './StationaryNewsCard';
 import {
   LocateFixed,
   Layers,
@@ -40,13 +42,16 @@ import {
   Search,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Globe,
   Loader2,
   Volume2,
   VolumeX,
   Building2,
-  Sparkles,
+  Flame,
 } from 'lucide-react';
+import { TemporalHeatmap } from './TemporalHeatmap';
 import { formatDistance, formatDuration, calculateDistanceMeters } from '../utils/geo';
 import {
   speakVoice,
@@ -69,16 +74,19 @@ interface MapTrackerProps {
   isTracking: boolean;
   theme: AppTheme;
   userName?: string;
+  userAvatarUrl?: string;
   activeDestinationName?: string | null;
   isNavigating: boolean;
   allUsers?: AppUser[];
   selectedUserIdFilter?: number | 'all';
-  contentTypeFilter?: 'all' | 'markers' | 'routes' | 'movements';
-  timeRangeFilter?: 'all' | '1w' | '2w' | '1m' | '3m' | '6m';
+  contentTypeFilter?: ContentTypeFilter;
+  timeRangeFilter?: TimeRangeFilter;
+  pointsHistory?: LocationPoint[];
+  completedRoutes?: CompletedRouteLog[];
   isSidebarCollapsed?: boolean;
   onSelectUserFilter?: (userId: number | 'all') => void;
-  onSelectContentTypeFilter?: (type: 'all' | 'markers' | 'routes' | 'movements') => void;
-  onSelectTimeRangeFilter?: (range: 'all' | '1w' | '2w' | '1m' | '3m' | '6m') => void;
+  onSelectContentTypeFilter?: (type: ContentTypeFilter) => void;
+  onSelectTimeRangeFilter?: (range: TimeRangeFilter) => void;
   onStartNavigation: () => void;
   onSelectPlace: (place: RecordedPlace) => void;
   onSelectCustomMarker: (marker: CustomMarker) => void;
@@ -87,7 +95,8 @@ interface MapTrackerProps {
     lng: number;
     name: string;
     description: string;
-    category?: 'generic' | 'work' | 'cafe' | 'home' | 'landmark' | 'store';
+    category?: string;
+    color?: string;
   }) => void;
   onEditCustomMarker?: (marker: CustomMarker) => void;
   onDeleteCustomMarker?: (markerId: number) => void;
@@ -112,8 +121,19 @@ const MapCameraController: React.FC<{
   const prevRoutesLen = React.useRef(0);
   const initialFitDoneRef = React.useRef(false);
   const prevFilterRef = React.useRef(selectedUserIdFilter);
+  const animFrameRef = React.useRef<number | null>(null);
 
-  // Automatically fit camera bounds to include ALL users and their locations on initial app load or when 'all' users is selected
+  // Clean up any running animation frame on unmount
+  React.useEffect(() => {
+    return () => {
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
+    };
+  }, []);
+
+  // Automatically fit camera bounds to include ALL users or smoothly glide to selected user
   React.useEffect(() => {
     if (!map || typeof google === 'undefined' || !google.maps || !allUsers || allUsers.length === 0) return;
 
@@ -122,6 +142,10 @@ const MapCameraController: React.FC<{
     const isFilterChangedToAll = selectedUserIdFilter === 'all' && prevFilterRef.current !== 'all';
 
     if (!initialFitDoneRef.current || isFilterChangedToAll) {
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
       const bounds = new google.maps.LatLngBounds();
       let validCount = 0;
       allUsers.forEach((u) => {
@@ -138,8 +162,71 @@ const MapCameraController: React.FC<{
     } else if (selectedUserIdFilter !== 'all' && prevFilterRef.current !== selectedUserIdFilter) {
       const selectedUser = allUsers.find((u) => u.id === selectedUserIdFilter);
       if (selectedUser?.currentPoint) {
-        map.panTo({ lat: selectedUser.currentPoint.lat, lng: selectedUser.currentPoint.lng });
-        map.setZoom(15);
+        const targetLat = selectedUser.currentPoint.lat;
+        const targetLng = selectedUser.currentPoint.lng;
+
+        if (animFrameRef.current) {
+          cancelAnimationFrame(animFrameRef.current);
+          animFrameRef.current = null;
+        }
+
+        const center = map.getCenter();
+        if (center) {
+          const startLat = center.lat();
+          const startLng = center.lng();
+          const deltaLat = targetLat - startLat;
+          const deltaLng = targetLng - startLng;
+          const dist = Math.sqrt(deltaLat * deltaLat + deltaLng * deltaLng);
+
+          // If distance is exceedingly small, simple pan
+          if (dist < 0.00003) {
+            map.panTo({ lat: targetLat, lng: targetLng });
+          } else {
+            const startZoom = map.getZoom() || 15;
+            const targetZoom = 15;
+            // Adaptive duration: 900ms to 1400ms based on distance
+            const durationMs = Math.min(1400, Math.max(900, Math.round(dist * 28000)));
+            const startTime = performance.now();
+
+            // Smooth cubic ease-in-out easing function
+            const easeInOutCubic = (t: number) =>
+              t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+            const step = (now: number) => {
+              const elapsed = now - startTime;
+              const progress = Math.min(1, elapsed / durationMs);
+              const ease = easeInOutCubic(progress);
+
+              const curLat = startLat + deltaLat * ease;
+              const curLng = startLng + deltaLng * ease;
+
+              map.setCenter(new google.maps.LatLng(curLat, curLng));
+
+              // Gentle camera elevation arc over distance so motion feels cinematic
+              if (dist > 0.012) {
+                const zoomArc = Math.sin(progress * Math.PI) * (dist > 0.04 ? 1.5 : 0.8);
+                const interimZoom = Math.round(startZoom + (targetZoom - startZoom) * ease - zoomArc);
+                if (map.getZoom() !== interimZoom) {
+                  map.setZoom(interimZoom);
+                }
+              }
+
+              if (progress < 1) {
+                animFrameRef.current = requestAnimationFrame(step);
+              } else {
+                map.setCenter(new google.maps.LatLng(targetLat, targetLng));
+                if (map.getZoom() !== targetZoom) {
+                  map.setZoom(targetZoom);
+                }
+                animFrameRef.current = null;
+              }
+            };
+
+            animFrameRef.current = requestAnimationFrame(step);
+          }
+        } else {
+          map.panTo({ lat: targetLat, lng: targetLng });
+        }
       }
     }
 
@@ -227,12 +314,15 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
   isTracking,
   theme,
   userName = 'Inioluwa',
+  userAvatarUrl,
   activeDestinationName,
   isNavigating,
   allUsers = [],
   selectedUserIdFilter = 'all',
   contentTypeFilter = 'all',
   timeRangeFilter = 'all',
+  pointsHistory = [],
+  completedRoutes = [],
   isSidebarCollapsed = false,
   onSelectUserFilter,
   onSelectContentTypeFilter,
@@ -285,6 +375,25 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Navigate dynamically between users
+  const handleCycleUser = useCallback(
+    (direction: 'prev' | 'next') => {
+      if (!allUsers || allUsers.length === 0 || !onSelectUserFilter) return;
+      const currentIdx = allUsers.findIndex((u) => u.id === selectedUserIdFilter);
+      let nextIdx = 0;
+      if (direction === 'next') {
+        nextIdx = currentIdx === -1 || currentIdx >= allUsers.length - 1 ? 0 : currentIdx + 1;
+      } else {
+        nextIdx = currentIdx <= 0 ? allUsers.length - 1 : currentIdx - 1;
+      }
+      const targetUser = allUsers[nextIdx];
+      if (targetUser) {
+        onSelectUserFilter(targetUser.id);
+      }
+    },
+    [allUsers, selectedUserIdFilter, onSelectUserFilter]
+  );
 
   // Search known locations all around the world via Photon Geocoding API (biased around user cluster center)
   useEffect(() => {
@@ -534,15 +643,19 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
     } catch (_) {}
   };
 
-  // New marker creation state from clicking map (category removed per user request)
+  // New marker creation state from clicking map
   const [pendingMarkerPoint, setPendingMarkerPoint] = useState<{ lat: number; lng: number } | null>(null);
   const [markerName, setMarkerName] = useState('');
   const [markerDesc, setMarkerDesc] = useState('');
+  const [markerCategory, setMarkerCategory] = useState('generic');
+  const [markerColor, setMarkerColor] = useState('#3B82F6');
 
-  // Editing existing marker state (category removed per user request)
+  // Editing existing marker state
   const [editingMarker, setEditingMarker] = useState<CustomMarker | null>(null);
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
+  const [editCategory, setEditCategory] = useState('generic');
+  const [editColor, setEditColor] = useState('#3B82F6');
   const [confirmDeleteMarkerId, setConfirmDeleteMarkerId] = useState<number | null>(null);
 
   const defaultCenter = currentPoint
@@ -551,18 +664,6 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
 
   // Currently active route (either selected or fastest default)
   const activeRoute = routes.find((r) => r.id === selectedRouteId) || routes[0];
-
-  // Stationary Spot Insights state
-  const currentSpeed = currentPoint ? currentPoint.speed : 0;
-  const isStationaryNow = currentSpeed <= 1.5;
-  const [isStationaryPanelOpen, setIsStationaryPanelOpen] = useState<boolean>(false);
-
-  // Auto-open panel when stationary state becomes active
-  useEffect(() => {
-    if (isStationaryNow) {
-      setIsStationaryPanelOpen(true);
-    }
-  }, [isStationaryNow]);
 
   // Voice Navigation State & Spoken Thresholds Ref
   const [isVoiceMutedState, setIsVoiceMutedState] = useState<boolean>(isVoiceMuted());
@@ -661,6 +762,8 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
     setPendingMarkerPoint(coords);
     setMarkerName('');
     setMarkerDesc('');
+    setMarkerCategory('generic');
+    setMarkerColor('#3B82F6');
   };
 
   const handleCreateMarkerSubmit = (e: React.FormEvent) => {
@@ -672,7 +775,8 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
       lng: pendingMarkerPoint.lng,
       name: finalName,
       description: markerDesc.trim() || 'User added point of interest',
-      category: 'generic',
+      category: markerCategory.trim() || 'generic',
+      color: markerColor,
     });
     setPendingMarkerPoint(null);
   };
@@ -681,6 +785,8 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
     setEditingMarker(marker);
     setEditName(marker.name);
     setEditDesc(marker.description || '');
+    setEditCategory(marker.category || 'generic');
+    setEditColor(marker.userColor || '#3B82F6');
   };
 
   const handleSaveEditMarker = (e: React.FormEvent) => {
@@ -690,7 +796,8 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
       ...editingMarker,
       name: editName.trim() || editingMarker.name,
       description: editDesc.trim(),
-      category: editingMarker.category || 'generic',
+      category: editCategory.trim() || 'generic',
+      userColor: editColor,
     });
     setEditingMarker(null);
   };
@@ -736,15 +843,32 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
             selectedRouteId={selectedRouteId}
             selectedSegmentId={selectedSegmentId}
             userName={userName}
+            userAvatarUrl={userAvatarUrl}
             isNavigating={isNavigating}
             theme={theme}
             allUsers={allUsers}
             selectedUserIdFilter={selectedUserIdFilter}
+            contentTypeFilter={contentTypeFilter}
+            onSelectUser={onSelectUserFilter}
             onSelectPlace={handlePlaceClick}
             onSelectCustomMarker={handleCustomMarkerClick}
             onSelectRoute={onSelectRoute}
             onMapClick={handleMapClick}
+            onRequestRoute={onRequestRoute}
           />
+          {(contentTypeFilter === 'all' || contentTypeFilter === 'heatmap') && (
+            <TemporalHeatmap
+              theme={theme}
+              timeRangeFilter={timeRangeFilter}
+              selectedUserIdFilter={selectedUserIdFilter}
+              pointsHistory={pointsHistory}
+              segments={segments}
+              completedRoutes={completedRoutes}
+              allUsers={allUsers}
+              onClose={() => onSelectContentTypeFilter && onSelectContentTypeFilter('all')}
+              onSelectTimeRangeFilter={onSelectTimeRangeFilter}
+            />
+          )}
           <MapCameraController
             targetPoint={mapCameraTarget || (currentPoint ? { lat: currentPoint.lat, lng: currentPoint.lng } : null)}
             triggerCenter={recenterCount}
@@ -758,14 +882,21 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
       {/* Reconfigured Top Toolbar: Location Search + Autocomplete & Plot Route Button, Users Dropdown, Content Sort, Time Range */}
       <div
         id="top-multi-user-bar"
-        className={`absolute top-3 left-3 z-20 flex flex-wrap items-center justify-between gap-2.5 p-2 rounded-2xl backdrop-blur-md border shadow-md transition-all max-w-2xl lg:max-w-3xl w-[calc(100%-1.5rem)] ${
+        className={`absolute top-3 left-3 z-20 flex items-center justify-between gap-2.5 p-2 rounded-2xl backdrop-blur-md border shadow-md transition-all ${
+          isSidebarCollapsed
+            ? 'w-full max-w-[70%] flex-nowrap overflow-x-auto no-scrollbar'
+            : 'w-[calc(100%-1.5rem)] max-w-2xl lg:max-w-3xl flex-wrap md:flex-nowrap'
+        } ${
           isDark
             ? 'bg-zinc-950/85 border-zinc-800/80 text-zinc-100'
             : 'bg-white/90 border-zinc-200/80 text-zinc-900'
         }`}
       >
-        {/* Left: Worldwide Location Search Bar + Autocomplete + Plot Route Primary Button */}
-        <div ref={searchContainerRef} className="relative flex items-center gap-2 flex-1 min-w-[240px] max-w-xl">
+        {/* Left: Worldwide Location Search Bar + Autocomplete + Plot Route Primary Button (Width increased by 50% on laptop screens) */}
+        <div
+          ref={searchContainerRef}
+          className="relative flex items-center gap-2 flex-1 min-w-[200px] max-w-md lg:max-w-[405px] xl:max-w-[420px]"
+        >
           <div className="relative flex-1 flex items-center">
             <Globe className="w-3.5 h-3.5 text-blue-500 absolute left-3 pointer-events-none" />
             <input
@@ -795,7 +926,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
                   setRecenterCount((c) => c + 1);
                 }
               }}
-              placeholder="Search locations (Area around users ➔ State ➔ Country)..."
+              placeholder="Search locations (Area ➔ State ➔ Country)..."
               className={`w-full pl-9 pr-8 py-1.5 text-xs rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-xs transition ${
                 isDark
                   ? 'bg-zinc-900/90 border-zinc-700 text-zinc-100 placeholder:text-zinc-500'
@@ -845,7 +976,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
           {isAutocompleteOpen && filteredLocations.length > 0 && (
             <div
               id="location-search-autocomplete"
-              className={`absolute top-full left-0 right-0 mt-1.5 rounded-xl border shadow-xl backdrop-blur-md overflow-hidden z-40 max-h-72 overflow-y-auto no-scrollbar py-1 ${
+              className={`absolute top-full left-0 mt-1.5 rounded-xl border shadow-xl backdrop-blur-md overflow-hidden z-40 max-h-72 min-w-[280px] sm:min-w-[340px] max-w-md w-full overflow-y-auto no-scrollbar py-1 ${
                 isDark ? 'bg-zinc-900/98 border-zinc-700 text-zinc-100' : 'bg-white/98 border-zinc-200 text-zinc-900'
               }`}
             >
@@ -941,47 +1072,90 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
                     : null;
 
                 return (
-                  <button
-                    type="button"
-                    id="users-filter-dropdown-trigger"
-                    onClick={() => setIsUserDropdownOpen((prev) => !prev)}
-                    className={`flex items-center gap-2 px-3 py-1.5 text-xs font-bold rounded-xl border shadow-xs transition cursor-pointer ${
+                  <div
+                    className={`inline-flex items-center rounded-xl border shadow-xs transition ${
                       isDark
-                        ? 'bg-zinc-900/90 border-zinc-700 text-zinc-100 hover:border-zinc-600'
-                        : 'bg-white/95 border-zinc-300 text-zinc-800 hover:border-zinc-400'
+                        ? 'bg-zinc-900/90 border-zinc-700'
+                        : 'bg-white/95 border-zinc-300'
                     }`}
                   >
-                    {activeUser ? (
-                      <>
-                        {activeUser.avatar ? (
-                          <img
-                            src={activeUser.avatar}
-                            alt={activeUser.name}
-                            className="w-5 h-5 rounded-full object-cover border shrink-0"
-                            style={{ borderColor: activeUser.color }}
-                          />
-                        ) : (
-                          <div
-                            className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0"
+                    {/* Previous User Navigation Arrow */}
+                    <button
+                      type="button"
+                      title="Navigate to previous user dynamically"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCycleUser('prev');
+                      }}
+                      className={`p-1.5 transition cursor-pointer border-r rounded-l-xl ${
+                        isDark
+                          ? 'border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
+                          : 'border-zinc-200 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100'
+                      }`}
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Active User Dropdown Trigger */}
+                    <button
+                      type="button"
+                      id="users-filter-dropdown-trigger"
+                      onClick={() => setIsUserDropdownOpen((prev) => !prev)}
+                      className={`flex items-center gap-2 px-2.5 py-1.5 text-xs font-bold transition cursor-pointer ${
+                        isDark
+                          ? 'text-zinc-100 hover:bg-zinc-800'
+                          : 'text-zinc-800 hover:bg-zinc-50'
+                      }`}
+                    >
+                      {activeUser ? (
+                        <>
+                          {activeUser.avatar ? (
+                            <img
+                              src={activeUser.avatar}
+                              alt={activeUser.name}
+                              className="w-5 h-5 rounded-full object-cover border shrink-0"
+                              style={{ borderColor: activeUser.color }}
+                            />
+                          ) : (
+                            <div
+                              className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0"
+                              style={{ backgroundColor: activeUser.color || '#3B82F6' }}
+                            >
+                              {activeUser.name.charAt(0).toUpperCase()}
+                            </div>
+                          )}
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0 shadow-xs"
                             style={{ backgroundColor: activeUser.color || '#3B82F6' }}
-                          >
-                            {activeUser.name.charAt(0).toUpperCase()}
-                          </div>
-                        )}
-                        <span
-                          className="w-2 h-2 rounded-full shrink-0 shadow-xs"
-                          style={{ backgroundColor: activeUser.color || '#3B82F6' }}
-                        />
-                        <span className="truncate max-w-[90px]">{activeUser.name}</span>
-                      </>
-                    ) : (
-                      <>
-                        <Users className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                        <span>All Users ({allUsers.length})</span>
-                      </>
-                    )}
-                    <ChevronDown className="w-3.5 h-3.5 text-zinc-400 shrink-0 ml-0.5" />
-                  </button>
+                          />
+                          <span className="truncate max-w-[85px]">{activeUser.name}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Users className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                          <span>All Users ({allUsers.length})</span>
+                        </>
+                      )}
+                      <ChevronDown className="w-3.5 h-3.5 text-zinc-400 shrink-0 ml-0.5" />
+                    </button>
+
+                    {/* Next User Navigation Arrow */}
+                    <button
+                      type="button"
+                      title="Navigate to next user dynamically"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCycleUser('next');
+                      }}
+                      className={`p-1.5 transition cursor-pointer border-l rounded-r-xl ${
+                        isDark
+                          ? 'border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
+                          : 'border-zinc-200 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100'
+                      }`}
+                    >
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 );
               })()}
 
@@ -1067,22 +1241,24 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
             </div>
           )}
 
-          {/* Content Type Sub-Sort Dropdown: All Content must just be Content */}
+          {/* Content Type Selector: All, Routes Only, Heatmap */}
           {onSelectContentTypeFilter && (
-            <select
-              id="content-type-sort-dropdown"
-              value={contentTypeFilter}
-              onChange={(e) => onSelectContentTypeFilter(e.target.value as any)}
-              className={`px-3 py-1.5 text-xs font-bold rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer shadow-xs transition shrink-0 ${
-                isDark
-                  ? 'bg-zinc-900/90 border-zinc-700 text-zinc-100'
-                  : 'bg-white/95 border-zinc-300 text-zinc-800'
-              }`}
-            >
-              <option value="all">Content</option>
-              <option value="markers">Markers Only</option>
-              <option value="routes">Routes Only</option>
-            </select>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <select
+                id="content-type-sort-dropdown"
+                value={contentTypeFilter}
+                onChange={(e) => onSelectContentTypeFilter(e.target.value as any)}
+                className={`px-3 py-1.5 text-xs font-bold rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer shadow-xs transition shrink-0 ${
+                  isDark
+                    ? 'bg-zinc-900/90 border-zinc-700 text-zinc-100'
+                    : 'bg-white/95 border-zinc-300 text-zinc-800'
+                }`}
+              >
+                <option value="all">All</option>
+                <option value="routes">Routes Only</option>
+                <option value="heatmap">Heatmap</option>
+              </select>
+            </div>
           )}
 
           {/* Time Range Filter Dropdown */}
@@ -1359,31 +1535,6 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
         </div>
       )}
 
-      {/* Stationary Spot Insights Floating Panel (Grounded Google Search Weather & Traffic) */}
-      {isStationaryPanelOpen && (
-        <div className="absolute top-16 right-4 z-20 max-w-sm w-[calc(100%-2rem)] sm:w-88 pointer-events-auto animate-in fade-in zoom-in-95 duration-200">
-          <div className="relative">
-            <button
-              onClick={() => setIsStationaryPanelOpen(false)}
-              className="absolute -top-2 -right-2 z-30 p-1 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-300 hover:text-white shadow-md cursor-pointer"
-              title="Close Insights Panel"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-            <StationaryNewsCard
-              lat={currentPoint ? currentPoint.lat : 7.1475}
-              lng={currentPoint ? currentPoint.lng : 3.3619}
-              speedKmH={currentSpeed}
-              isStationary={isStationaryNow}
-              locationName={
-                recordedPlaces.length > 0 ? recordedPlaces[0].name : 'Abeokuta'
-              }
-              isDark={isDark}
-            />
-          </div>
-        </div>
-      )}
-
       {/* Non-Modal Add Marker Floating Panel */}
       {pendingMarkerPoint && !routes.length && (
         <div className="absolute top-16 right-4 z-20 max-w-sm w-[calc(100%-2rem)] sm:w-80 pointer-events-auto animate-in fade-in slide-in-from-top-2 duration-150">
@@ -1434,6 +1585,64 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
                 />
               </div>
 
+              <div>
+                <label className="block text-[11px] font-medium mb-1 text-zinc-500">Category</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Work, Cafe, Gym, Home, Landmark"
+                  value={markerCategory}
+                  onChange={(e) => setMarkerCategory(e.target.value)}
+                  className={`w-full px-2.5 py-1.5 rounded-lg border text-xs focus:outline-none ${
+                    isDark
+                      ? 'bg-zinc-950 border-zinc-800 text-zinc-100 focus:border-zinc-600'
+                      : 'bg-zinc-50 border-zinc-300 text-zinc-900 focus:border-zinc-500'
+                  }`}
+                />
+                <div className="flex flex-wrap gap-1 mt-1.5">
+                  {['work', 'cafe', 'home', 'gym', 'store', 'landmark'].map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setMarkerCategory(cat)}
+                      className={`text-[10px] px-1.5 py-0.5 rounded capitalize transition cursor-pointer border ${
+                        markerCategory.toLowerCase() === cat
+                          ? 'bg-blue-500/20 text-blue-500 border-blue-500/40 font-bold'
+                          : isDark
+                          ? 'bg-zinc-800/60 text-zinc-400 border-zinc-700/60 hover:text-zinc-200'
+                          : 'bg-zinc-100 text-zinc-600 border-zinc-200 hover:text-zinc-900'
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium mb-1 text-zinc-500">Marker Color</label>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'].map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setMarkerColor(c)}
+                      style={{ backgroundColor: c }}
+                      className={`w-5 h-5 rounded-full border transition cursor-pointer ${
+                        markerColor === c ? 'ring-2 ring-offset-2 ring-blue-500 scale-110' : 'opacity-85 hover:opacity-100'
+                      }`}
+                    />
+                  ))}
+                  <label className="relative cursor-pointer ml-1" title="Custom color picker">
+                    <input
+                      type="color"
+                      value={markerColor}
+                      onChange={(e) => setMarkerColor(e.target.value)}
+                      className="w-5 h-5 rounded-full border cursor-pointer appearance-none bg-transparent overflow-hidden"
+                    />
+                  </label>
+                </div>
+              </div>
+
               <div className="flex items-center gap-2 pt-1">
                 <button
                   type="button"
@@ -1479,7 +1688,7 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
             <div className="flex items-center justify-between border-b pb-3 border-zinc-200 dark:border-zinc-800">
               <div className="flex items-center gap-2">
                 <Pencil className="w-4 h-4 text-blue-500" />
-                <h3 className="text-sm font-bold">Edit Marker Name</h3>
+                <h3 className="text-sm font-bold">Edit Marker</h3>
               </div>
               <button
                 onClick={() => setEditingMarker(null)}
@@ -1505,6 +1714,64 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
                   placeholder="Enter marker name"
                   autoFocus
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium mb-1 text-zinc-500">Category</label>
+                <input
+                  type="text"
+                  value={editCategory}
+                  onChange={(e) => setEditCategory(e.target.value)}
+                  className={`w-full px-3 py-2 rounded-xl border text-xs focus:outline-none ${
+                    isDark
+                      ? 'bg-zinc-950 border-zinc-800 text-zinc-100 focus:border-blue-500'
+                      : 'bg-zinc-50 border-zinc-300 text-zinc-900 focus:border-blue-500'
+                  }`}
+                  placeholder="e.g. Work, Cafe, Gym, Home, Landmark"
+                />
+                <div className="flex flex-wrap gap-1 mt-1.5">
+                  {['work', 'cafe', 'home', 'gym', 'store', 'landmark'].map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setEditCategory(cat)}
+                      className={`text-[10px] px-2 py-0.5 rounded capitalize transition cursor-pointer border ${
+                        editCategory.toLowerCase() === cat
+                          ? 'bg-blue-500/20 text-blue-500 border-blue-500/40 font-bold'
+                          : isDark
+                          ? 'bg-zinc-800/60 text-zinc-400 border-zinc-700/60 hover:text-zinc-200'
+                          : 'bg-zinc-100 text-zinc-600 border-zinc-200 hover:text-zinc-900'
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium mb-1 text-zinc-500">Marker Color</label>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'].map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setEditColor(c)}
+                      style={{ backgroundColor: c }}
+                      className={`w-6 h-6 rounded-full border transition cursor-pointer ${
+                        editColor === c ? 'ring-2 ring-offset-2 ring-blue-500 scale-110' : 'opacity-85 hover:opacity-100'
+                      }`}
+                    />
+                  ))}
+                  <label className="relative cursor-pointer ml-1" title="Custom color picker">
+                    <input
+                      type="color"
+                      value={editColor}
+                      onChange={(e) => setEditColor(e.target.value)}
+                      className="w-6 h-6 rounded-full border cursor-pointer appearance-none bg-transparent overflow-hidden"
+                    />
+                  </label>
+                </div>
               </div>
 
               {/* Save button with icon at bottom left below input field */}
@@ -1630,13 +1897,6 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
             <Plane className="w-3.5 h-3.5 text-purple-500 shrink-0" />
             <span className="hidden sm:inline">Airplane</span>
           </div>
-
-          <span className="w-px h-3 bg-zinc-300 dark:bg-zinc-700" />
-
-          <div className="flex items-center gap-1.5" title="Recorded Places">
-            <MapPin className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-            <span className="hidden sm:inline">Places</span>
-          </div>
         </div>
 
         {/* Icon Button: Re-center */}
@@ -1669,26 +1929,6 @@ export const MapTracker: React.FC<MapTrackerProps> = ({
           title={`Switch Map Type (Current: ${mapType})`}
         >
           <Layers className="w-4 h-4" />
-        </button>
-
-        {/* Stationary Spot Insights Toggle Button */}
-        <button
-          id="stationary-spot-insights-btn"
-          onClick={() => setIsStationaryPanelOpen((prev) => !prev)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full shadow-md border backdrop-blur-md transition-all active:scale-95 text-xs font-bold cursor-pointer ${
-            isStationaryNow
-              ? 'bg-emerald-600 text-white border-emerald-400/60 shadow-emerald-950/40'
-              : isDark
-              ? 'bg-zinc-900/90 border-zinc-800 text-zinc-200 hover:bg-zinc-800'
-              : 'bg-white/95 border-zinc-200 text-zinc-700 hover:bg-zinc-50'
-          }`}
-          title="Stationary Spot Insights: Today's Grounded Weather & Traffic News"
-        >
-          <Sparkles className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-          <span className="hidden sm:inline">Spot Insights</span>
-          {isStationaryNow && (
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping shrink-0" />
-          )}
         </button>
       </div>
     </div>

@@ -130,7 +130,7 @@ export const LoginOverlay: React.FC<LoginOverlayProps> = ({
             </div>
             <div>
               <span className="text-xs font-bold uppercase tracking-widest text-blue-500">
-                Home Security
+                Location Tracker
               </span>
               <h2 className="text-base font-extrabold tracking-tight">User Authentication</h2>
             </div>

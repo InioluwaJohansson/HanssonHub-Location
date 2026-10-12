@@ -33,6 +33,7 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import { formatDistance, formatDuration, formatSpeed } from '../utils/geo';
+import { formatNameString } from '../utils/auth';
 
 interface MovementLogsProps {
   segments: JourneySegment[];
@@ -45,6 +46,7 @@ interface MovementLogsProps {
   currentPoint: LocationPoint | null;
   stats: TrackingStats;
   theme: AppTheme;
+  userAvatarUrl?: string;
   isNavigating?: boolean;
   allUsers?: AppUser[];
   selectedUserIdFilter?: number | 'all';
@@ -73,6 +75,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
   currentPoint,
   stats,
   theme,
+  userAvatarUrl,
   isNavigating = false,
   allUsers,
   selectedUserIdFilter = 'all',
@@ -89,7 +92,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
   onSelectRoute,
   onOpenDataSchema,
 }) => {
-  const [activeTab, setActiveTab] = useState<'segments' | 'places' | 'markers' | 'routes'>('segments');
+  const [activeTab, setActiveTab] = useState<'segments' | 'markers' | 'routes'>('segments');
   const [modeFilter, setModeFilter] = useState<'all' | 'walking' | 'vehicle' | 'airplane'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -99,6 +102,8 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
   const [isMarkerUserDropdownOpen, setIsMarkerUserDropdownOpen] = useState(false);
   const [editingMarkerId, setEditingMarkerId] = useState<number | null>(null);
   const [editingMarkerName, setEditingMarkerName] = useState('');
+  const [editingMarkerCategory, setEditingMarkerCategory] = useState('generic');
+  const [editingMarkerColor, setEditingMarkerColor] = useState('#3B82F6');
   const [markerToDelete, setMarkerToDelete] = useState<CustomMarker | null>(null);
 
   // Route status filter and sorting
@@ -144,10 +149,12 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
 
   const handleSaveInlineMarkerName = (marker: CustomMarker) => {
     const trimmed = editingMarkerName.trim();
-    if (trimmed && trimmed !== marker.name && onEditCustomMarker) {
+    if (onEditCustomMarker) {
       onEditCustomMarker({
         ...marker,
-        name: trimmed,
+        name: trimmed || marker.name,
+        category: editingMarkerCategory.trim() || marker.category || 'generic',
+        userColor: editingMarkerColor || marker.userColor || '#3B82F6',
       });
     }
     setEditingMarkerId(null);
@@ -161,7 +168,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
       type: 'active-user' as const,
       status: 'active' as const,
       userId: u.id,
-      userName: u.name,
+      userName: formatNameString(u.name),
       userColor: u.color,
       userAvatar: u.avatar,
       destinationName: u.activeDestinationName || 'Navigating Destination',
@@ -182,7 +189,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
     type: r.status === 'completed' ? ('completed' as const) : ('cancelled' as const),
     status: r.status || 'completed',
     userId: r.userId,
-    userName: r.userName,
+    userName: formatNameString(r.userName),
     userColor: r.userColor,
     userAvatar: r.userAvatar,
     destinationName: r.destinationName,
@@ -199,26 +206,29 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
   }));
 
   const allUnifiedRoutes = [
-    ...routes.map((rt) => ({
-      id: rt.id,
-      type: 'active-option' as const,
-      status: 'active' as const,
-      userId: rt.userId ?? 1,
-      userName: rt.userName ?? 'You',
-      userColor: rt.userColor ?? '#2563EB',
-      userAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80',
-      destinationName: rt.summary,
-      destinationCoords: rt.path && rt.path.length > 0 ? rt.path[rt.path.length - 1] : { lat: 7.1475, lng: 3.3619 },
-      distanceMeters: rt.distanceMeters,
-      durationSeconds: rt.durationSeconds,
-      durationFormatted: rt.durationFormatted,
-      timestamp: Date.now(),
-      timeDisplayString: 'In Progress',
-      travelMode: rt.travelMode,
-      isFastest: rt.isFastest,
-      routeOption: rt as RouteOption | undefined,
-      speedKmH: currentPoint?.speed || 0,
-    })),
+    ...routes.map((rt) => {
+      const matchedUser = (allUsers || []).find((u) => u.id === (rt.userId ?? 1));
+      return {
+        id: rt.id,
+        type: 'active-option' as const,
+        status: 'active' as const,
+        userId: rt.userId ?? 1,
+        userName: formatNameString(rt.userName ?? (matchedUser ? matchedUser.name : 'Inioluwa Johansson')),
+        userColor: rt.userColor ?? (matchedUser ? matchedUser.color : '#2563EB'),
+        userAvatar: matchedUser?.avatar || userAvatarUrl || '',
+        destinationName: rt.summary,
+        destinationCoords: rt.path && rt.path.length > 0 ? rt.path[rt.path.length - 1] : { lat: 7.1475, lng: 3.3619 },
+        distanceMeters: rt.distanceMeters,
+        durationSeconds: rt.durationSeconds,
+        durationFormatted: rt.durationFormatted,
+        timestamp: Date.now(),
+        timeDisplayString: 'In Progress',
+        travelMode: rt.travelMode,
+        isFastest: rt.isFastest,
+        routeOption: rt as RouteOption | undefined,
+        speedKmH: currentPoint?.speed || 0,
+      };
+    }),
     ...otherNavigatingRoutes,
     ...historyRoutes,
   ];
@@ -285,7 +295,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
             </div>
             <div>
               <h2 className="text-sm font-semibold tracking-tight">Movement Logs</h2>
-              <p className="text-[11px] text-zinc-500">Telemetry, Places &amp; Routes</p>
+              <p className="text-[11px] text-zinc-500">Telemetry &amp; Routes</p>
             </div>
           </div>
 
@@ -323,20 +333,6 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
           >
             <Layers className="w-3 h-3" />
             Segments ({segments.length})
-          </button>
-
-          <button
-            onClick={() => setActiveTab('places')}
-            className={`py-1.5 px-2.5 text-xs font-medium border-b-2 whitespace-nowrap transition flex items-center gap-1.5 ${
-              activeTab === 'places'
-                ? isDark
-                  ? 'border-zinc-100 text-zinc-100 font-semibold'
-                  : 'border-zinc-900 text-zinc-900 font-semibold'
-                : 'border-transparent text-zinc-400 hover:text-zinc-600'
-            }`}
-          >
-            <MapPin className="w-3 h-3" />
-            Places ({visibleRecordedPlaces.length})
           </button>
 
           <button
@@ -483,13 +479,6 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                       <div className="flex items-center justify-between mb-1.5">
                         <div className="flex items-center gap-1.5">
                           <span
-                            className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
-                              isDark ? 'bg-zinc-800 text-zinc-400' : 'bg-zinc-100 text-zinc-600'
-                            }`}
-                          >
-                            #{segments.length - idx}
-                          </span>
-                          <span
                             className={`text-[11px] px-2 py-0.5 rounded-full font-semibold flex items-center gap-1 border ${
                               isWalking
                                 ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
@@ -574,116 +563,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
           </div>
         )}
 
-        {/* TAB 2: PLACES (Without speed, total distance, requirement, or 1:30s text as requested) */}
-        {activeTab === 'places' && (
-          <div className="space-y-2.5">
-            {visibleRecordedPlaces.length === 0 ? (
-              <div className="text-center py-10 px-4 text-zinc-500 space-y-2">
-                <MapPin className="w-7 h-7 mx-auto opacity-40" />
-                <p className="text-xs">No stationary places recorded yet.</p>
-                <p className="text-[11px] text-zinc-400">
-                  Places are recorded automatically after staying stationary for 1 minute and 30 seconds.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {visibleRecordedPlaces.map((place, idx) => (
-                  <div
-                    key={`${place.id}-${idx}`}
-                    onClick={() => onSelectPlace(place)}
-                    className={`p-3 rounded-xl border transition cursor-pointer space-y-2 ${
-                      isDark
-                        ? 'bg-zinc-900/60 border-zinc-800 hover:border-zinc-700'
-                        : 'bg-white border-zinc-200 hover:border-zinc-300'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <div
-                          className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs border ${
-                            isDark
-                              ? 'bg-zinc-800 text-zinc-200 border-zinc-700'
-                              : 'bg-zinc-100 text-zinc-800 border-zinc-300'
-                          }`}
-                        >
-                          #{idx + 1}
-                        </div>
-                        <div>
-                          <h4 className="text-xs font-semibold">
-                            {place.name || 'Recorded Place'}
-                          </h4>
-                          {place.address && (
-                            <p className="text-[10px] text-zinc-400 truncate max-w-[190px]">
-                              {place.address}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-
-                      <span
-                        className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium border ${
-                          isDark
-                            ? 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                            : 'bg-zinc-100 text-zinc-700 border-zinc-300'
-                        }`}
-                      >
-                        {formatDuration(place.dwellDurationSeconds)}
-                      </span>
-                    </div>
-
-                    <div
-                      className={`grid grid-cols-2 gap-1.5 text-[11px] font-mono p-2 rounded-lg border ${
-                        isDark ? 'bg-zinc-950/70 border-zinc-800' : 'bg-zinc-50 border-zinc-200'
-                      }`}
-                    >
-                      <div>
-                        <span className="text-zinc-500 text-[10px] block">Arrived:</span>
-                        <span className="text-zinc-700 dark:text-zinc-300">
-                          {new Date(place.arrivedAt).toLocaleTimeString()}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-zinc-500 text-[10px] block">Departed:</span>
-                        <span className="text-zinc-700 dark:text-zinc-300">
-                          {place.departedAt
-                            ? new Date(place.departedAt).toLocaleTimeString()
-                            : 'Present'}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="text-[11px] text-zinc-500 flex justify-between items-center">
-                      <span className="text-[10px] font-medium">GPS Precision:</span>
-                      <span className="text-zinc-600 dark:text-zinc-400 font-mono text-[10.5px]">
-                        ±{Math.round(place.accuracy)}m (Protected Coordinate)
-                      </span>
-                    </div>
-
-                    <div className="pt-1">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRequestRoute({ lat: place.lat, lng: place.lng }, place.name);
-                        }}
-                        className={`w-full py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 border transition cursor-pointer ${
-                          isDark
-                            ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
-                            : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-800 border-zinc-300'
-                        }`}
-                      >
-                        <Route className="w-3.5 h-3.5" />
-                        <span>Find Route</span>
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* TAB 3: CUSTOM USER MARKERS */}
+        {/* TAB 2: CUSTOM USER MARKERS */}
         {activeTab === 'markers' && (
           <div className="space-y-3">
             {/* Search and User Select Filter Controls placed side by side */}
@@ -739,13 +619,13 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                               <img
                                 src={
                                   selectedUserObj.avatar ||
-                                  `https://ui-avatars.com/api/?name=${encodeURIComponent(selectedUserObj.name)}&background=3b82f6&color=fff`
+                                  `https://ui-avatars.com/api/?name=${encodeURIComponent(formatNameString(selectedUserObj.name))}&background=3b82f6&color=fff`
                                 }
-                                alt={selectedUserObj.name}
+                                alt={formatNameString(selectedUserObj.name)}
                                 className="w-5 h-5 rounded-full object-cover shrink-0 border"
                                 style={{ borderColor: selectedUserObj.color || '#3b82f6' }}
                               />
-                              <span className="truncate">{selectedUserObj.name}</span>
+                              <span className="truncate">{formatNameString(selectedUserObj.name)}</span>
                             </>
                           ) : (
                             <>
@@ -817,13 +697,13 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                                     <img
                                       src={
                                         u.avatar ||
-                                        `https://ui-avatars.com/api/?name=${encodeURIComponent(u.name)}&background=3b82f6&color=fff`
+                                        `https://ui-avatars.com/api/?name=${encodeURIComponent(formatNameString(u.name))}&background=3b82f6&color=fff`
                                       }
-                                      alt={u.name}
+                                      alt={formatNameString(u.name)}
                                       className="w-5 h-5 rounded-full object-cover shrink-0 border"
                                       style={{ borderColor: u.color || '#3b82f6' }}
                                     />
-                                    <span className="truncate">{u.name}</span>
+                                    <span className="truncate">{formatNameString(u.name)}</span>
                                     <span
                                       className="w-2 h-2 rounded-full shrink-0"
                                       style={{ backgroundColor: u.color || '#3b82f6' }}
@@ -896,39 +776,108 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                           </div>
 
                           {isEditingThisMarker ? (
-                            /* Inline Edit Mode: Input field with name and save button at bottom left */
+                            /* Inline Edit Mode: Input field with name, category, color and save button at bottom left */
                             <div
-                              className="flex-1 min-w-0"
+                              className="flex-1 min-w-0 space-y-2"
                               onClick={(e) => e.stopPropagation()}
                             >
-                              <label
-                                htmlFor={`edit-marker-name-${marker.id}`}
-                                className="block text-[10px] font-semibold text-zinc-400 mb-1"
-                              >
-                                Edit Marker Name:
-                              </label>
-                              <input
-                                type="text"
-                                id={`edit-marker-name-${marker.id}`}
-                                value={editingMarkerName}
-                                onChange={(e) => setEditingMarkerName(e.target.value)}
-                                autoFocus
-                                className={`w-full px-2.5 py-1.5 text-xs font-semibold rounded-lg border focus:outline-none focus:ring-1 ${
-                                  isDark
-                                    ? 'bg-zinc-950 border-zinc-700 text-zinc-100 focus:border-zinc-400 focus:ring-zinc-400'
-                                    : 'bg-white border-zinc-300 text-zinc-900 focus:border-zinc-500 focus:ring-zinc-500'
-                                }`}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
-                                    e.preventDefault();
-                                    handleSaveInlineMarkerName(marker);
-                                  } else if (e.key === 'Escape') {
-                                    setEditingMarkerId(null);
-                                  }
-                                }}
-                              />
+                              <div>
+                                <label
+                                  htmlFor={`edit-marker-name-${marker.id}`}
+                                  className="block text-[10px] font-semibold text-zinc-400 mb-0.5"
+                                >
+                                  Marker Name:
+                                </label>
+                                <input
+                                  type="text"
+                                  id={`edit-marker-name-${marker.id}`}
+                                  value={editingMarkerName}
+                                  onChange={(e) => setEditingMarkerName(e.target.value)}
+                                  autoFocus
+                                  className={`w-full px-2.5 py-1.5 text-xs font-semibold rounded-lg border focus:outline-none focus:ring-1 ${
+                                    isDark
+                                      ? 'bg-zinc-950 border-zinc-700 text-zinc-100 focus:border-zinc-400 focus:ring-zinc-400'
+                                      : 'bg-white border-zinc-300 text-zinc-900 focus:border-zinc-500 focus:ring-zinc-500'
+                                  }`}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      handleSaveInlineMarkerName(marker);
+                                    } else if (e.key === 'Escape') {
+                                      setEditingMarkerId(null);
+                                    }
+                                  }}
+                                />
+                              </div>
+
+                              <div>
+                                <label
+                                  htmlFor={`edit-marker-cat-${marker.id}`}
+                                  className="block text-[10px] font-semibold text-zinc-400 mb-0.5"
+                                >
+                                  Category:
+                                </label>
+                                <input
+                                  type="text"
+                                  id={`edit-marker-cat-${marker.id}`}
+                                  value={editingMarkerCategory}
+                                  onChange={(e) => setEditingMarkerCategory(e.target.value)}
+                                  placeholder="e.g. Work, Cafe, Home, Gym"
+                                  className={`w-full px-2.5 py-1 text-xs rounded-lg border focus:outline-none ${
+                                    isDark
+                                      ? 'bg-zinc-950 border-zinc-700 text-zinc-100 focus:border-zinc-400'
+                                      : 'bg-white border-zinc-300 text-zinc-900 focus:border-zinc-500'
+                                  }`}
+                                />
+                                <div className="flex flex-wrap gap-1 mt-1">
+                                  {['work', 'cafe', 'home', 'gym', 'store', 'landmark'].map((cat) => (
+                                    <button
+                                      key={cat}
+                                      type="button"
+                                      onClick={() => setEditingMarkerCategory(cat)}
+                                      className={`text-[9px] px-1.5 py-0.5 rounded capitalize transition cursor-pointer border ${
+                                        editingMarkerCategory.toLowerCase() === cat
+                                          ? 'bg-blue-500/20 text-blue-500 border-blue-500/40 font-bold'
+                                          : isDark
+                                          ? 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-zinc-200'
+                                          : 'bg-zinc-100 text-zinc-600 border-zinc-200 hover:text-zinc-900'
+                                      }`}
+                                    >
+                                      {cat}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+
+                              <div>
+                                <label className="block text-[10px] font-semibold text-zinc-400 mb-0.5">
+                                  Color:
+                                </label>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  {['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'].map((c) => (
+                                    <button
+                                      key={c}
+                                      type="button"
+                                      onClick={() => setEditingMarkerColor(c)}
+                                      style={{ backgroundColor: c }}
+                                      className={`w-4 h-4 rounded-full border transition cursor-pointer ${
+                                        editingMarkerColor === c ? 'ring-2 ring-offset-1 ring-blue-500 scale-110' : 'opacity-85 hover:opacity-100'
+                                      }`}
+                                    />
+                                  ))}
+                                  <label className="relative cursor-pointer ml-0.5" title="Custom color picker">
+                                    <input
+                                      type="color"
+                                      value={editingMarkerColor}
+                                      onChange={(e) => setEditingMarkerColor(e.target.value)}
+                                      className="w-4 h-4 rounded-full border cursor-pointer appearance-none bg-transparent overflow-hidden"
+                                    />
+                                  </label>
+                                </div>
+                              </div>
+
                               {/* Save button with icon at bottom left below the input field */}
-                              <div className="flex items-center gap-2 mt-2 justify-start">
+                              <div className="flex items-center gap-2 pt-1 justify-start">
                                 <button
                                   type="button"
                                   id={`save-marker-btn-${marker.id}`}
@@ -962,7 +911,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                                     className="text-[9px] px-1.5 py-0.2 rounded-full text-white font-medium shrink-0"
                                     style={{ backgroundColor: marker.userColor || '#6366f1' }}
                                   >
-                                    {marker.userName}
+                                    {formatNameString(marker.userName)}
                                   </span>
                                 )}
                               </div>
@@ -982,9 +931,11 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                                   e.stopPropagation();
                                   setEditingMarkerId(marker.id);
                                   setEditingMarkerName(marker.name);
+                                  setEditingMarkerCategory(marker.category || 'generic');
+                                  setEditingMarkerColor(marker.userColor || '#3B82F6');
                                 }}
                                 className="text-zinc-400 hover:text-blue-500 p-1 rounded-md transition cursor-pointer"
-                                title="Edit marker name"
+                                title="Edit marker"
                               >
                                 <Pencil className="w-3.5 h-3.5" />
                               </button>
@@ -1194,7 +1145,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                           {rt.userAvatar ? (
                             <img
                               src={rt.userAvatar}
-                              alt={rt.userName}
+                              alt={formatNameString(rt.userName)}
                               className="w-7 h-7 rounded-full object-cover border shrink-0"
                               style={{ borderColor: rt.userColor }}
                               referrerPolicy="no-referrer"
@@ -1204,7 +1155,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                               className="w-7 h-7 rounded-full flex items-center justify-center text-xs text-white font-bold shrink-0 shadow-xs"
                               style={{ backgroundColor: rt.userColor }}
                             >
-                              {rt.userName.charAt(0).toUpperCase()}
+                              {formatNameString(rt.userName).charAt(0).toUpperCase()}
                             </div>
                           )}
                           <div className="min-w-0">
@@ -1212,7 +1163,7 @@ export const MovementLogs: React.FC<MovementLogsProps> = ({
                               {rt.destinationName}
                             </span>
                             <span className="text-[10px] text-zinc-400 block truncate">
-                              {rt.userName} &bull; {rt.timeDisplayString}
+                              {formatNameString(rt.userName)} &bull; {rt.timeDisplayString}
                             </span>
                           </div>
                         </div>

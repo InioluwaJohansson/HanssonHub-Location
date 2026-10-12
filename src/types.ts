@@ -4,6 +4,10 @@ export type AppTheme = 'light' | 'dark';
 
 export type RouteStatus = 'active' | 'completed' | 'cancelled';
 
+export type ContentTypeFilter = 'all' | 'markers' | 'routes' | 'movements' | 'heatmap';
+
+export type TimeRangeFilter = 'all' | '1w' | '2w' | '1m' | '3m' | '6m';
+
 export interface LocationPoint {
   id: number;
   userId?: number; // Integer identifier for the user
@@ -108,7 +112,7 @@ export interface CustomMarker {
   lng: number;
   name: string;
   description: string;
-  category: 'generic' | 'work' | 'cafe' | 'home' | 'landmark' | 'store';
+  category: string;
   createdAt: number;
   isFromStayPoint?: boolean;
 }
